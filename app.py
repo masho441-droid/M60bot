@@ -1,7 +1,7 @@
 import asyncio
 import time
 import requests
-from datetime import datetime, time as dt_time
+from datetime import datetime
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -15,7 +15,6 @@ MAX_PRICE = 6.0
 MIN_CHANGE = 1.5
 MIN_REL_VOL = 2.0
 MIN_TRADE_VALUE = 100000
-MAX_RESULTS = 10
 
 last_values = {}
 alert_counters = {}
@@ -59,17 +58,10 @@ def fetch_stocks():
                         "trade_value": trade_value
                     })
         stocks.sort(key=lambda x: x["rel_vol"], reverse=True)
-        return stocks[:MAX_RESULTS]
+        return stocks
     except Exception as e:
         print(f"خطأ في جلب البيانات: {e}")
         return []
-
-def is_trading_time():
-    now = datetime.now()
-    current_time = now.time()
-    start = dt_time(4, 0)
-    end = dt_time(20, 0)
-    return start <= current_time < end
 
 def calculate_strength(change, rel_vol, trade_value):
     score = 0
@@ -126,7 +118,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ *البوت جاهز ويعمل الآن*\n\n"
         "📊 يراقب جميع الأسهم الأمريكية\n"
         "🔍 يبحث عن اختراقات وفق المعايير\n"
-        "📈 يرسل أقوى الإشارات فقط\n\n"
+        "📈 يرسل جميع الإشارات مع متابعة الأسهم\n\n"
         "🚀 تداول موفق",
         parse_mode="Markdown"
     )
@@ -153,11 +145,6 @@ async def main():
     print("--- أوامر البوت مفعلة ---")
 
     while True:
-        if not is_trading_time():
-            print("خارج أوقات التداول. انتظار 5 دقائق...")
-            await asyncio.sleep(300)
-            continue
-
         stocks = fetch_stocks()
         if not stocks:
             print("لا توجد فرص حالياً.")
