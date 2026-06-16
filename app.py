@@ -1,4 +1,3 @@
-cat > app.py << 'EOF'
 import asyncio
 import time
 import requests
@@ -11,9 +10,9 @@ bot = Bot(token=TOKEN)
 
 MIN_PRICE = 0.5
 MAX_PRICE = 6.0
-MIN_REL_VOL = 2.0
-MIN_CHANGE = 1.5
-MIN_TRADE_VALUE = 100000
+MIN_REL_VOL = 1.5
+MIN_CHANGE = 1.0
+MIN_TRADE_VALUE = 50000
 
 last_values = {}
 alert_counters = {}
@@ -50,7 +49,7 @@ def fetch_top_stocks():
                     "volume": d[4]
                 })
         stocks.sort(key=lambda x: x["rel_vol"], reverse=True)
-        return stocks[:10]
+        return stocks[:100]
     except Exception as e:
         print(f"خطأ في جلب البيانات: {e}")
         return []
@@ -108,7 +107,7 @@ def should_send_update(symbol, rel_vol, change):
     return False
 
 async def main():
-    await send_msg("✅ *تم تشغيل نظام رصد الاختراقات بنجاح!*")
+    await send_msg("✅ *تم تشغيل نظام رصد الاختراقات (نسخة موسعة)!*")
     print("--- البوت يعمل ---")
 
     while True:
@@ -164,4 +163,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-EOF
