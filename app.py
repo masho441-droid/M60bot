@@ -1,32 +1,29 @@
+cat > app.py << 'EOF'
+import asyncio
 import time
 import requests
 from datetime import datetime
 from telegram import Bot
 
-# ==================== الإعدادات الأساسية ====================
 TOKEN = "8633972708:AAGxG5GwbvvzyKPrcxAoU2hn90QJkiQttmA"
 CHAT_ID = "-1003936661851"
 bot = Bot(token=TOKEN)
 
-# ==================== معايير الاستراتيجية ====================
 MIN_PRICE = 0.5
 MAX_PRICE = 6.0
 MIN_REL_VOL = 2.0
 MIN_CHANGE = 1.5
-MIN_TRADE_VALUE = 100000   # $100,000
+MIN_TRADE_VALUE = 100000
 
-# قاموس لتتبع آخر القيم (لمنع التكرار)
 last_values = {}
 alert_counters = {}
 
-# ==================== دالة إرسال الرسائل ====================
-def send_msg(text):
+async def send_msg(text):
     try:
-        bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="Markdown")
+        await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="Markdown")
     except Exception as e:
-        print(f"خطأ في الإرسال: {e}")
+        print(f"خطأ: {e}")
 
-# ==================== جلب البيانات من TradingView ====================
 def fetch_top_stocks():
     url = "https://scanner.tradingview.com/america/scan"
     payload = {
@@ -58,7 +55,6 @@ def fetch_top_stocks():
         print(f"خطأ في جلب البيانات: {e}")
         return []
 
-# ==================== حساب قوة الإشارة ====================
 def calculate_strength(change, rel_vol, trade_value):
     score = 0
     score += min(change * 10, 35)
@@ -103,7 +99,6 @@ def get_strength_text(strength):
     else:
         return "👀 متوسطة"
 
-# ==================== التحقق من تحديث الزخم ====================
 def should_send_update(symbol, rel_vol, change):
     if symbol not in last_values:
         return True
@@ -112,16 +107,15 @@ def should_send_update(symbol, rel_vol, change):
         return True
     return False
 
-# ==================== الحلقة الرئيسية ====================
-def main():
-    send_msg("✅ *تم تشغيل نظام رصد الاختراقات بنجاح!*")
+async def main():
+    await send_msg("✅ *تم تشغيل نظام رصد الاختراقات بنجاح!*")
     print("--- البوت يعمل ---")
 
     while True:
         stocks = fetch_top_stocks()
         if not stocks:
             print("لا توجد بيانات، انتظر 30 ثانية...")
-            time.sleep(30)
+            await asyncio.sleep(30)
             continue
 
         for stock in stocks:
@@ -163,10 +157,11 @@ def main():
                 f"🛑 *وقف الخسارة:* `${trailing_stop:.2f}`\n"
                 f"📈 *نسبة النجاح:* `{success_rate}`"
             )
-            send_msg(msg)
-            time.sleep(1)
+            await send_msg(msg)
+            await asyncio.sleep(1)
 
-        time.sleep(10)
+        await asyncio.sleep(10)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
+EOF
