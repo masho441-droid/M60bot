@@ -5,29 +5,26 @@ from datetime import datetime
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ==================== الإعدادات الأساسية ====================
 TOKEN = "8633972708:AAGxG5GwbvvzyKPrcxAoU2hn90QJkiQttmA"
 CHAT_ID = "-1003936661851"
 bot = Bot(token=TOKEN)
 
-# ==================== معايير الاستراتيجية ====================
+# ==================== معايير منخفضة جداً للاختبار ====================
 MIN_PRICE = 0.5
 MAX_PRICE = 6.0
-MIN_REL_VOL = 1.5
-MIN_CHANGE = 1.0
-MIN_TRADE_VALUE = 50000
+MIN_REL_VOL = 0.1      # أي حجم نسبي
+MIN_CHANGE = 0.1       # أي تغير
+MIN_TRADE_VALUE = 1000 # أي قيمة تداول
 
 last_values = {}
 alert_counters = {}
 
-# ==================== دالة إرسال الرسائل ====================
 async def send_msg(text):
     try:
         await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="Markdown")
     except Exception as e:
         print(f"خطأ في الإرسال: {e}")
 
-# ==================== جلب جميع الأسهم ====================
 def fetch_all_stocks():
     url = "https://scanner.tradingview.com/america/scan"
     payload = {
@@ -59,7 +56,6 @@ def fetch_all_stocks():
         print(f"خطأ في جلب البيانات: {e}")
         return []
 
-# ==================== حساب قوة الإشارة ====================
 def calculate_strength(change, rel_vol, trade_value):
     score = 0
     score += min(change * 10, 35)
@@ -112,31 +108,30 @@ def should_send_update(symbol, rel_vol, change):
         return True
     return False
 
-# ==================== أوامر البوت ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "✅ *البوت جاهز ويعمل الآن*\n\n"
         "📊 يراقب جميع الأسهم الأمريكية\n"
         "🔍 يبحث عن اختراقات واضحة\n"
         "📈 يرسل تنبيهات عند العثور على فرص\n\n"
-        "🚀 تداول موفق"
+        "🚀 تداول موفق",
+        parse_mode="Markdown"
     )
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📊 *حالة البوت*\n"
-        "✅ يعمل\n"
-        "⏱️ فحص كل 10 ثوانٍ\n"
-        "📈 عدد التنبيهات المرسلة: " + str(sum(alert_counters.values())) +
-        "\n🔍 جاهز للبحث عن فرص جديدة"
+        f"📊 *حالة البوت*\n"
+        f"✅ يعمل\n"
+        f"⏱️ فحص كل 10 ثوانٍ\n"
+        f"📈 عدد التنبيهات المرسلة: {sum(alert_counters.values())}\n"
+        f"🔍 جاهز للبحث عن فرص جديدة",
+        parse_mode="Markdown"
     )
 
-# ==================== الحلقة الرئيسية ====================
 async def main():
-    await send_msg("✅ *البوت جاهز ويعمل الآن*")
+    await send_msg("✅ *البوت جاهز ويعمل الآن (معايير منخفضة للاختبار)*")
     print("--- البوت يعمل ---")
 
-    # تشغيل البوت للأوامر
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
@@ -148,10 +143,11 @@ async def main():
     while True:
         stocks = fetch_all_stocks()
         if not stocks:
-            print("لا توجد بيانات، انتظر 30 ثانية...")
-            await asyncio.sleep(30)
+            print("لا توجد بيانات، انتظر 10 ثوانٍ...")
+            await asyncio.sleep(10)
             continue
 
+        print(f"تم جلب {len(stocks)} سهماً")
         for stock in stocks:
             symbol = stock["symbol"]
             price = stock["price"]
@@ -160,6 +156,7 @@ async def main():
             volume = stock["volume"]
             trade_value = volume * price
 
+            # معايير منخفضة جداً (للتجربة)
             if change < MIN_CHANGE or rel_vol < MIN_REL_VOL or trade_value < MIN_TRADE_VALUE:
                 continue
 
@@ -192,9 +189,10 @@ async def main():
                 f"📈 *نسبة النجاح:* `{success_rate}`"
             )
             await send_msg(msg)
-            await asyncio.sleep(1)
+            print(f"تم إرسال تنبيه لـ {symbol}")
+            await asyncio.sleep(0.5)
 
-        await asyncio.sleep(10)
+        await asyncio.sleep(5)  # فحص سريع جداً
 
 if __name__ == "__main__":
     asyncio.run(main())
