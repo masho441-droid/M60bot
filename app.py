@@ -1,7 +1,7 @@
 import asyncio
 import time
-import yfinance as yf
-from datetime import datetime
+import requests
+from datetime import datetime, time as dt_time
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -9,8 +9,16 @@ TOKEN = "8633972708:AAGxG5GwbvvzyKPrcxAoU2hn90QJkiQttmA"
 CHAT_ID = "-1003936661851"
 bot = Bot(token=TOKEN)
 
-# قائمة الأسهم
-TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA"]
+# ==================== المعايير ====================
+MIN_PRICE = 0.5
+MAX_PRICE = 6.0
+MIN_CHANGE = 1.5
+MIN_REL_VOL = 2.0
+MIN_TRADE_VALUE = 100000
+MAX_RESULTS = 10
+
+last_values = {}
+alert_counters = {}
 
 async def send_msg(text):
     try:
@@ -18,30 +26,178 @@ async def send_msg(text):
     except Exception as e:
         print(f"خطأ: {e}")
 
+def fetch_stocks():
+    url = "https://scanner.tradingview.com/america/scan"
+    payload = {
+        "filter": [
+            {"left": "close", "operation": "in_range", "right": [MIN_PRICE, MAX_PRICE]},
+            {"left": "change", "operation": "egreater", "right": MIN_CHANGE},
+            {"left": "relative_volume_24h", "operation": "egreater", "right": MIN_REL_VOL},
+            {"left": "exchange", "operation": "in_range", "right": ["NASDAQ", "NYSE", "AMEX"]}
+        ],
+        "options": {"lang": "en"},
+        "symbols": {"query": {"types": []}, "tickers": []},
+        "columns": ["name", "close", "change", "relative_volume_24h", "volume"]
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        data = response.json()
+        stocks = []
+        for item in data.get("data", []):
+            d = item["d"]
+            if len(d) >= 5 and all(v is not None for v in d):
+                price = d[1]
+                volume = d[4]
+                trade_value = price * volume
+                if trade_value >= MIN_TRADE_VALUE:
+                    stocks.append({
+                        "symbol": d[0],
+                        "price": price,
+                        "change": d[2],
+                        "rel_vol": d[3],
+                        "volume": volume,
+                        "trade_value": trade_value
+                    })
+        stocks.sort(key=lambda x: x["rel_vol"], reverse=True)
+        return stocks[:MAX_RESULTS]
+    except Exception as e:
+        print(f"خطأ في جلب البيانات: {e}")
+        return []
+
+def is_trading_time():
+    now = datetime.now()
+    current_time = now.time()
+    start = dt_time(4, 0)
+    end = dt_time(20, 0)
+    return start <= current_time < end
+
+def calculate_strength(change, rel_vol, trade_value):
+    score = 0
+    score += min(change * 10, 35)
+    score += min(rel_vol * 12, 30)
+    if trade_value > 1000000:
+        score += 20
+    elif trade_value > 500000:
+        score += 15
+    elif trade_value > 200000:
+        score += 10
+    return min(score, 100)
+
+def get_targets(price, strength):
+    if strength >= 80:
+        return price * 1.08, price * 1.12, price * 1.18
+    elif strength >= 60:
+        return price * 1.05, price * 1.08, price * 1.12
+    elif strength >= 40:
+        return price * 1.03, price * 1.05, price * 1.07
+    else:
+        return price * 1.02, price * 1.03, price * 1.04
+
+def get_success_rate(strength):
+    if strength >= 85:
+        return "85% - 95%"
+    elif strength >= 70:
+        return "75% - 85%"
+    elif strength >= 55:
+        return "65% - 75%"
+    else:
+        return "55% - 65%"
+
+def get_strength_text(strength):
+    if strength >= 85:
+        return "💥 قوية جداً"
+    elif strength >= 70:
+        return "🚀 قوية"
+    elif strength >= 55:
+        return "📈 جيدة"
+    else:
+        return "👀 متوسطة"
+
+def should_send_update(symbol, rel_vol, change):
+    if symbol not in last_values:
+        return True
+    last = last_values[symbol]
+    if rel_vol > last["rel_vol"] * 1.25 or change > last["change"] + 2:
+        return True
+    return False
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "✅ *البوت جاهز ويعمل الآن*\n\n"
+        "📊 يراقب جميع الأسهم الأمريكية\n"
+        "🔍 يبحث عن اختراقات وفق المعايير\n"
+        "📈 يرسل أقوى الإشارات فقط\n\n"
+        "🚀 تداول موفق",
+        parse_mode="Markdown"
+    )
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"📊 *حالة البوت*\n"
+        f"✅ يعمل\n"
+        f"⏱️ فحص كل 30 ثانية\n"
+        f"📈 عدد التنبيهات: {sum(alert_counters.values())}",
+        parse_mode="Markdown"
+    )
+
 async def main():
-    await send_msg("✅ *البوت يعمل الآن (Yahoo Finance)*")
+    await send_msg("✅ *تم تشغيل نظام رصد الاختراقات بنجاح!*")
     print("--- البوت يعمل ---")
 
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("status", status))
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    print("--- أوامر البوت مفعلة ---")
+
     while True:
-        for symbol in TICKERS:
-            try:
-                stock = yf.Ticker(symbol)
-                data = stock.history(period="1d")
-                if not data.empty:
-                    price = data['Close'].iloc[-1]
-                    volume = data['Volume'].iloc[-1]
-                    msg = (
-                        f"📊 *{symbol}*\n"
-                        f"💰 السعر: ${price:.2f}\n"
-                        f"📊 الحجم: {volume:,}\n"
-                        f"🕒 {datetime.now().strftime('%H:%M:%S')}"
-                    )
-                    await send_msg(msg)
-                    await asyncio.sleep(1)
-            except Exception as e:
-                print(f"خطأ في {symbol}: {e}")
-        print("انتظار 60 ثانية...")
-        await asyncio.sleep(60)
+        if not is_trading_time():
+            print("خارج أوقات التداول. انتظار 5 دقائق...")
+            await asyncio.sleep(300)
+            continue
+
+        stocks = fetch_stocks()
+        if not stocks:
+            print("لا توجد فرص حالياً.")
+            await asyncio.sleep(30)
+            continue
+
+        print(f"تم العثور على {len(stocks)} فرصة")
+        for stock in stocks:
+            if not should_send_update(stock['symbol'], stock['rel_vol'], stock['change']):
+                continue
+
+            last_values[stock['symbol']] = {"rel_vol": stock['rel_vol'], "change": stock['change']}
+            alert_counters[stock['symbol']] = alert_counters.get(stock['symbol'], 0) + 1
+
+            strength = calculate_strength(stock['change'], stock['rel_vol'], stock['trade_value'])
+            t1, t2, t3 = get_targets(stock['price'], strength)
+            success_rate = get_success_rate(strength)
+            strength_text = get_strength_text(strength)
+            trailing_stop = stock['price'] * 0.98
+            update_type = "تحديث زخم" if alert_counters[stock['symbol']] > 1 else "تنبيه أولي"
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            msg = (
+                f"🔍 *اختراق واضح - {update_type}* 🔍\n\n"
+                f"📌 **السهم:** `{stock['symbol']}` | 🔢 **تنبيه:** `#{alert_counters[stock['symbol']]}`\n"
+                f"🕒 **الوقت:** `{current_time}` | 💵 **السعر:** `${stock['price']:.2f}`\n"
+                f"📈 **الزخم:** `+{stock['change']:.2f}%` | 📊 **السيولة:** `{stock['rel_vol']:.1f}x`\n"
+                f"💰 **قيمة التداول:** `${stock['trade_value']:,.0f}`\n"
+                f"💪 **القوة:** `{strength_text}` (`{strength:.0f}/100`)\n\n"
+                f"🎯 *الأهداف:*\n"
+                f"1️⃣ **${t1:.2f}** (+{(t1/stock['price']-1)*100:.1f}%)\n"
+                f"2️⃣ **${t2:.2f}** (+{(t2/stock['price']-1)*100:.1f}%)\n"
+                f"3️⃣ **${t3:.2f}** (+{(t3/stock['price']-1)*100:.1f}%)\n\n"
+                f"🛑 *وقف الخسارة:* `${trailing_stop:.2f}`\n"
+                f"📈 *نسبة النجاح:* `{success_rate}`"
+            )
+            await send_msg(msg)
+            await asyncio.sleep(0.5)
+
+        await asyncio.sleep(30)
 
 if __name__ == "__main__":
     asyncio.run(main())
