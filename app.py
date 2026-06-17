@@ -2,57 +2,37 @@ import asyncio
 import requests
 from telegram import Bot
 
-# --- الإعدادات ---
 TOKEN = "8633972708:AAGxG5GwbvvzyKPrcxAoU2hn90QJkiQttmA"
 CHAT_ID = "-1003936661851"
 bot = Bot(token=TOKEN)
 
-# --- محرك جلب البيانات ---
-def fetch_stocks():
-    url = "https://scanner.tradingview.com/america/scan"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Content-Type": "application/json"
-    }
-    # فلاتر متوازنة: سعر بين 0.5 و 10، تغير أكثر من 1%، سيولة مضاعفة
-    payload = {
-        "filter": [
-            {"left": "close", "operation": "in_range", "right": [0.5, 10.0]},
-            {"left": "change", "operation": "egreater", "right": 1.0},
-            {"left": "relative_volume_24h", "operation": "egreater", "right": 1.5},
-            {"left": "exchange", "operation": "in_range", "right": ["NASDAQ", "NYSE", "AMEX"]}
-        ],
-        "options": {"lang": "en"},
-        "columns": ["name", "close", "change", "relative_volume_24h"],
-        "sort": {"sortBy": "relative_volume_24h", "sortOrder": "desc"}
-    }
-    try:
-        res = requests.post(url, json=payload, headers=headers, timeout=10)
-        return res.json().get("data", [])
-    except:
-        return None
+# سنقوم بمراقبة قائمة ثابتة من الأسهم النشطة جداً
+WATCHLIST = ["NASDAQ:AAPL", "NASDAQ:TSLA", "NASDAQ:AMD", "NASDAQ:NVDA", "NASDAQ:PLTR"]
 
-# --- الحلقة الرئيسية ---
 async def main():
-    await bot.send_message(chat_id=CHAT_ID, text="🤖 *البوت يعمل الآن - نظام المسح نشط*")
+    await bot.send_message(chat_id=CHAT_ID, text="✅ *تم تشغيل البوت بنظام مراقبة القوائم المباشر.*")
     
     while True:
-        data = fetch_stocks()
-        
-        if data is not None:
-            if len(data) > 0:
-                msg = f"🔍 *تم العثور على {len(data)} فرصة:* \n"
-                for item in data[:5]:
-                    d = item["d"]
-                    msg += f"• `{d[0]}`: {d[1]}$ | 📈 {d[2]}% | 📊 Vol: {d[3]:.1f}x\n"
-                await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
-            else:
-                # هذا يرسل تنبيهاً واحداً كل فترة لتعرف أنه يعمل بصمت
-                print("Scanner active: No stocks matching criteria.")
-        else:
-            await bot.send_message(chat_id=CHAT_ID, text="⚠️ *خطأ: فشل الاتصال بسيرفر السوق.*")
+        try:
+            # استخدام API مباشر للحصول على الأسعار الحالية
+            url = "https://quote.tradingview.com/quotes"
+            params = {"symbols": ",".join(WATCHLIST)}
+            res = requests.get(url, params=params, timeout=10)
+            data = res.json()
             
-        await asyncio.sleep(120) # الفحص كل دقيقتين
+            msg = "📊 *تحديث الأسعار الآن:*\n"
+            for item in data.get("quotes", []):
+                name = item["symbol"]
+                price = item["lp"] # Last Price
+                change = item["ch"] # Change
+                msg += f"• `{name}`: {price}$ ({change}%)\n"
+            
+            await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
+            
+        except Exception as e:
+            print(f"Error: {e}")
+            
+        await asyncio.sleep(300) # تحديث كل 5 دقائق
 
 if __name__ == "__main__":
     asyncio.run(main())
