@@ -8,46 +8,46 @@ bot = Bot(token=TOKEN)
 
 def fetch_stocks():
     url = "https://scanner.tradingview.com/america/scan"
-    # تغيير الـ Headers ليكون أكثر محاكاة لمتصفح حقيقي (تجنب الحظر)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Origin": "https://www.tradingview.com",
-        "Referer": "https://www.tradingview.com/",
         "Content-Type": "application/json"
     }
+    
+    # نطلب رموزاً محددة للتأكد من وصول البيانات من السيرفر
     payload = {
-        "filter": [
-            {"left": "close", "operation": "in_range", "right": [0.5, 20.0]},
-            {"left": "change", "operation": "egreater", "right": 0.5}
-        ],
-        "options": {"lang": "en"},
-        "columns": ["name", "close", "change"],
-        "sort": {"sortBy": "change", "sortOrder": "desc"},
-        "range": [0, 10]
+        "symbols": {
+            "tickers": ["NASDAQ:AAPL", "NASDAQ:TSLA", "NASDAQ:AMD", "NYSE:F", "NYSE:GE"],
+            "query": {"types": ["stock"]}
+        },
+        "columns": ["name", "close", "change"]
     }
+    
     try:
         res = requests.post(url, json=payload, headers=headers, timeout=10)
         return res.json().get("data", [])
     except Exception as e:
-        print(f"DEBUG ERROR: {e}")
+        print(f"DEBUG: {e}")
         return None
 
 async def main():
-    await bot.send_message(chat_id=CHAT_ID, text="🚀 *محرك البحث الجديد يعمل.. أنتظر البيانات الآن*")
+    await bot.send_message(chat_id=CHAT_ID, text="🧪 *بدء وضع التشخيص:* جارِ طلب بيانات أسهم محددة للتأكد من الاتصال..")
+    
     while True:
         data = fetch_stocks()
+        
         if data is not None:
             if len(data) > 0:
-                msg = "🔍 *أسهم نشطة الآن في السوق:*\n"
-                for item in data[:5]:
+                msg = "✅ *تم استلام البيانات بنجاح:*\n"
+                for item in data:
                     d = item["d"]
                     msg += f"• `{d[0]}`: {d[1]}$ (+{d[2]}%)\n"
                 await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
             else:
-                await bot.send_message(chat_id=CHAT_ID, text="⚠️ *البوت متصل ولكن لا توجد أسهم تطابق الفلتر البسيط.*")
+                await bot.send_message(chat_id=CHAT_ID, text="❌ *البوت متصل، لكن لم يتم جلب أي بيانات للرموز المحددة.*")
         else:
-            await bot.send_message(chat_id=CHAT_ID, text="❌ *فشل الاتصال بسيرفر البيانات.*")
-        await asyncio.sleep(60)
+            await bot.send_message(chat_id=CHAT_ID, text="⚠️ *فشل الاتصال بسيرفر تريدنق فيو.*")
+            
+        await asyncio.sleep(60) # فحص كل دقيقة
 
 if __name__ == "__main__":
     asyncio.run(main())
