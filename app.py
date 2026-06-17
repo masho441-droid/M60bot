@@ -32,6 +32,12 @@ alert_counters = {}
 def get_ny_time():
     return datetime.now(pytz.timezone('America/New_York'))
 
+def is_regular_trading():
+    ny_now = get_ny_time()
+    open_time = ny_now.replace(hour=9, minute=30, second=0)
+    close_time = ny_now.replace(hour=16, minute=0, second=0)
+    return open_time <= ny_now <= close_time
+
 async def send_msg(text):
     try:
         await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="Markdown")
@@ -121,7 +127,7 @@ async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turno
     update_type = "تحديث زخم" if alert_num > 1 else "تنبيه أولي - اختراق سيولة"
     
     msg = (
-        f"🔥 *M60 Hunter - صيد مبكر متقدم (جميع الأوقات)*\n\n"
+        f"🔥 *M60 Hunter - صيد مبكر متقدم*\n\n"
         f"⏰ `{now}`\n"
         f"🔴 `{symbol}` | 📊 `#{alert_num}`\n\n"
         f"💰 `{price:.2f}` | 📈 `+{change:.2f}%`\n"
@@ -136,13 +142,18 @@ async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turno
 
 # ==================== الحلقة الرئيسية ====================
 async def main():
-    await send_msg("✅ *M60 Hunter - صيد مبكر متقدم (جميع الأوقات)*")
-    print("--- البوت يعمل 24/7 ---")
+    await send_msg("✅ *M60 Hunter - صيد مبكر متقدم*")
+    print("--- البوت يعمل ---")
 
     async with aiohttp.ClientSession() as session:
         while True:
+            if not is_regular_trading():
+                print("⏸️ خارج ساعات التداول العادي. إيقاف الفحص...")
+                await asyncio.sleep(60)
+                continue
+
             tickers = await fetch_all_tickers(session)
-            print(f"📡 تم جلب {len(tickers)} سهماً - {get_ny_time().strftime('%H:%M:%S')}")
+            print(f"📡 تم جلب {len(tickers)} سهماً")
 
             tasks = [fetch_stock_data(session, t) for t in tickers[:100]]
             results = await asyncio.gather(*tasks)
