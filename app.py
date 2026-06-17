@@ -14,7 +14,6 @@ bot = Bot(token=TOKEN)
 MIN_PRICE = 0.1
 MAX_PRICE = 10.0
 MIN_CHANGE = 1.0
-MIN_MBI = 1.2
 MIN_VOLUME = 50000
 UPDATE_THRESHOLD = 0.03  # 3% زيادة لتحديث التنبيه
 
@@ -41,9 +40,6 @@ def is_volume_accelerating(volumes):
     last_vol = volumes[-1]
     avg_5min = sum(volumes[-6:-1]) / 5
     return last_vol >= avg_5min * 2
-
-def calculate_mbi(change, volume_ratio):
-    return (change / 1.5) * (volume_ratio / 2.0)
 
 def calculate_momentum_acceleration(price_history):
     if len(price_history) < 3:
@@ -93,9 +89,42 @@ def fetch_stock_data(symbol):
         print(f"خطأ في {symbol}: {e}")
         return None
 
-# ==================== التحليل والإرسال ====================
+# ==================== إرسال التنبيه ====================
+async def send_alert(symbol, price, change, volume_ratio, alert_num):
+    if alert_num == 1:
+        strength_text = "📈 بداية انطلاق"
+        success_rate = "65% - 75%"
+    else:
+        strength_text = "🚀 تحديث زخم"
+        success_rate = "75% - 85%"
+    
+    target1 = price * 1.05
+    target2 = price * 1.08
+    target3 = price * 1.12
+    stop = price * 0.97
+    
+    msg = (
+        f"🔥 *تنبيه استراتيجي - صيد الانفجارات* 🔥\n\n"
+        f"⏰ *الوقت:* {get_ny_time().strftime('%H:%M:%S')}\n"
+        f"🔴 *الرمز:* {symbol}\n"
+        f"📊 *رقم التنبيه:* {alert_num}\n"
+        f"📈 *الحالة:* {strength_text}\n\n"
+        f"💰 *السعر:* ${price:.2f}\n"
+        f"📈 *الصعود:* +{change:.2f}%\n"
+        f"📊 *الحجم النسبي:* {volume_ratio:.2f}x\n\n"
+        f"🎯 *الأهداف المتوقعة:*\n"
+        f"🟢 *الهدف الأول:* ${target1:.2f}  (+5.0%)\n"
+        f"🟡 *الهدف الثاني:* ${target2:.2f}  (+8.0%)\n"
+        f"🔴 *الهدف الثالث:* ${target3:.2f}  (+12.0%)\n\n"
+        f"🛑 *وقف الخسارة:* ${stop:.2f}  (-3.0%)\n"
+        f"📈 *نسبة النجاح المتوقعة:* {success_rate}\n\n"
+        f"✨ *تم اكتشاف السهم بواسطة خوارزمية M60 Hunter* ✨"
+    )
+    await send_msg(msg)
+
+# ==================== الحلقة الرئيسية ====================
 async def main():
-    await send_msg("✅ *نظام الرصد المتطور (مع MBI + تسارع) يعمل الآن*")
+    await send_msg("✅ *نظام الرصد المتطور (بدون MBI) يعمل الآن*")
     print("--- البوت يعمل ---")
 
     while True:
@@ -106,7 +135,6 @@ async def main():
             await asyncio.sleep(3600)
             continue
 
-        # قائمة الأسهم (يمكن توسيعها)
         stocks = ["RIVN", "LCID", "QS", "CLOV", "WKHS", "MULN", "PLTR", "SOFI", "BB", "HUT"]
         
         for symbol in stocks:
@@ -128,62 +156,23 @@ async def main():
             avg_vol = avg_volume_cache[symbol]
             volume_ratio = volume / avg_vol if avg_vol > 0 else 1.0
             
-            mbi = calculate_mbi(change, volume_ratio)
             momentum_acc = calculate_momentum_acceleration(price_history)
             vol_acc = is_volume_accelerating(volumes)
             
-            # ===== شرط التنبيه الأول =====
+            # ===== شرط التنبيه الأول (بدون MBI) =====
             if symbol not in last_values:
-                if change >= MIN_CHANGE and mbi >= MIN_MBI and momentum_acc > 0 and vol_acc:
+                if change >= MIN_CHANGE and momentum_acc > 0 and vol_acc:
                     last_values[symbol] = {"price": price, "change": change, "rel_vol": volume_ratio}
                     alert_counters[symbol] = 1
-                    await send_alert(symbol, price, change, volume_ratio, mbi, 1)
+                    await send_alert(symbol, price, change, volume_ratio, 1)
             else:
                 # ===== شرط التحديث (زيادة 3%) =====
                 if price >= last_values[symbol]["price"] * (1 + UPDATE_THRESHOLD):
                     last_values[symbol] = {"price": price, "change": change, "rel_vol": volume_ratio}
                     alert_counters[symbol] = alert_counters.get(symbol, 0) + 1
-                    await send_alert(symbol, price, change, volume_ratio, mbi, alert_counters[symbol])
+                    await send_alert(symbol, price, change, volume_ratio, alert_counters[symbol])
         
         await asyncio.sleep(30)
-
-async def send_alert(symbol, price, change, volume_ratio, mbi, alert_num):
-    if mbi >= 2.5:
-        success_rate = "85% - 95%"
-        strength_text = "💥 انفجار قوي جداً"
-    elif mbi >= 1.8:
-        success_rate = "75% - 85%"
-        strength_text = "🚀 انفجار قوي"
-    elif mbi >= 1.2:
-        success_rate = "65% - 75%"
-        strength_text = "📈 بداية انطلاق"
-    else:
-        success_rate = "55% - 65%"
-        strength_text = "👀 مراقبة"
-    
-    target1 = price * 1.05
-    target2 = price * 1.08
-    target3 = price * 1.12
-    stop = price * 0.97
-    
-    msg = (
-        f"🔥 *تنبيه استراتيجي - صيد الانفجارات* 🔥\n\n"
-        f"⏰ *الوقت:* {get_ny_time().strftime('%H:%M:%S')}\n"
-        f"🔴 *الرمز:* {symbol}\n"
-        f"📊 *رقم التنبيه:* {alert_num}\n"
-        f"📈 *MBI:* {mbi:.2f} ({strength_text})\n\n"
-        f"💰 *السعر:* ${price:.2f}\n"
-        f"📈 *الصعود:* +{change:.2f}%\n"
-        f"📊 *الحجم النسبي:* {volume_ratio:.2f}x\n\n"
-        f"🎯 *الأهداف المتوقعة:*\n"
-        f"🟢 *الهدف الأول:* ${target1:.2f}  (+5.0%)\n"
-        f"🟡 *الهدف الثاني:* ${target2:.2f}  (+8.0%)\n"
-        f"🔴 *الهدف الثالث:* ${target3:.2f}  (+12.0%)\n\n"
-        f"🛑 *وقف الخسارة:* ${stop:.2f}  (-3.0%)\n"
-        f"📈 *نسبة النجاح المتوقعة:* {success_rate}\n\n"
-        f"✨ *تم اكتشاف السهم بواسطة خوارزمية M60 Hunter* ✨"
-    )
-    await send_msg(msg)
 
 if __name__ == "__main__":
     asyncio.run(main())
