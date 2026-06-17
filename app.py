@@ -2,15 +2,15 @@ import asyncio
 import requests
 from telegram import Bot
 
-# الإعدادات
 TOKEN = "8633972708:AAGxG5GwbvvzyKPrcxAoU2hn90QJkiQttmA"
 CHAT_ID = "-1003936661851"
 bot = Bot(token=TOKEN)
 
-# المعايير
-MIN_PRICE, MAX_PRICE = 0.5, 6.0
-MIN_CHANGE = 1.5
-MIN_REL_VOL = 2.0
+# --- معايير مخففة جداً للتجربة ---
+# سنوسع النطاق ليشمل كل شيء تقريباً
+MIN_PRICE, MAX_PRICE = 0.1, 500.0  # نطاق سعري واسع
+MIN_CHANGE = 0.1                   # أقل حركة (0.1%)
+MIN_REL_VOL = 0.5                  # أي سهم نشط قليلاً
 
 def fetch_stocks():
     url = "https://scanner.tradingview.com/america/scan"
@@ -19,22 +19,18 @@ def fetch_stocks():
         "filter": [
             {"left": "close", "operation": "in_range", "right": [MIN_PRICE, MAX_PRICE]},
             {"left": "change", "operation": "egreater", "right": MIN_CHANGE},
-            {"left": "relative_volume_24h", "operation": "egreater", "right": MIN_REL_VOL},
-            {"left": "exchange", "operation": "in_range", "right": ["NASDAQ", "NYSE", "AMEX"]}
+            {"left": "relative_volume_24h", "operation": "egreater", "right": MIN_REL_VOL}
         ],
-        "columns": ["name", "close", "change", "relative_volume_24h", "volume"]
+        "columns": ["name", "close", "change", "relative_volume_24h", "volume"],
+        "options": {"lang": "en"}
     }
     try:
         res = requests.post(url, json=payload, headers=headers, timeout=10)
-        # إرجاع البيانات إذا نجح الاتصال
         return res.json().get("data", [])
-    except Exception as e:
-        print(f"Error: {e}")
-        return None  # إرجاع None للإشارة إلى وجود خطأ في الاتصال
+    except: return None
 
 async def main():
-    print("--- Sniper Engine: Diagnostic Mode Active ---")
-    await bot.send_message(chat_id=CHAT_ID, text="✅ *البوت في وضع التشخيص - سأبلغك بكل فحص*")
+    await bot.send_message(chat_id=CHAT_ID, text="🧪 *تم تشغيل وضع الاختبار (معايير مرنة).* سأرسل لك كل ما أجده!")
     
     while True:
         stocks = fetch_stocks()
@@ -42,22 +38,16 @@ async def main():
         if stocks is not None:
             count = len(stocks)
             if count > 0:
-                # البوت يرى أسهم
-                msg = f"🔍 *فحص دوري:* تم العثور على {count} سهم يطابق معاييرك الدقيقة."
-                await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
-                
-                # إرسال تفاصيل الأسهم (بحد أقصى 5 لتجنب إغراق القناة)
-                for item in stocks[:5]:
+                await bot.send_message(chat_id=CHAT_ID, text=f"🔍 *تم العثور على {count} سهم!* سأعرض لك أول 3 منها للتأكد من النظام:")
+                for item in stocks[:3]:
                     d = item["d"]
-                    await bot.send_message(chat_id=CHAT_ID, text=f"🚀 *سهم:* `{d[0]}` | السعر: `{d[1]}` | التغير: `+{d[2]}%`", parse_mode="Markdown")
+                    await bot.send_message(chat_id=CHAT_ID, text=f"🚀 *سهم:* `{d[0]}` | السعر: `{d[1]}` | التغير: `+{d[2]}%`")
             else:
-                # البوت يرى السوق لكن لا توجد فرص تطابق المعايير الصارمة
-                await bot.send_message(chat_id=CHAT_ID, text="❌ *فحص دوري:* البوت متصل، ولكن لا توجد أسهم تطابق المعايير حالياً.")
+                await bot.send_message(chat_id=CHAT_ID, text="❌ *لا توجد أسهم حالياً.*")
         else:
-            # مشكلة في الاتصال بالسيرفر
-            await bot.send_message(chat_id=CHAT_ID, text="⚠️ *تحذير:* فشل الاتصال بسيرفرات تريدنق فيو (TradingView).")
+            await bot.send_message(chat_id=CHAT_ID, text="⚠️ *فشل الاتصال.*")
             
-        await asyncio.sleep(300) # فحص كل 5 دقائق
+        await asyncio.sleep(120) # الفحص كل دقيقتين
 
 if __name__ == "__main__":
     asyncio.run(main())
