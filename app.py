@@ -4,7 +4,7 @@ import requests
 from datetime import datetime
 from telegram import Bot
 
-# سحب البيانات من متغيرات Railway (تأكد من إضافتها هناك)
+# سحب البيانات من متغيرات Railway
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 bot = Bot(token=TOKEN)
