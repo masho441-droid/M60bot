@@ -1,6 +1,6 @@
 import os
 import asyncio
-import requests
+import aiohttp
 import time
 import random
 from datetime import datetime
@@ -22,15 +22,54 @@ last_values = {}
 alert_counters = {}
 avg_volume_cache = {}
 
-# ==================== جلسة HTTP ذكية ====================
-session = requests.Session()
-session.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'application/json',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Connection': 'keep-alive'
-})
+# ==================== جلب جميع الأسهم من TradingView ====================
+async def fetch_all_tickers(session):
+    url = "https://scanner.tradingview.com/america/scan"
+    payload = {
+        "filter": [
+            {"left": "close", "operation": "in_range", "right": [MIN_PRICE, MAX_PRICE]},
+            {"left": "exchange", "operation": "in_range", "right": ["NASDAQ", "NYSE", "AMEX"]}
+        ],
+        "columns": ["name"]
+    }
+    try:
+        async with session.post(url, json=payload, timeout=10) as resp:
+            data = await resp.json()
+            return [item["d"][0] for item in data.get("data", [])]
+    except Exception as e:
+        print(f"خطأ في جلب القائمة: {e}")
+        return []
 
+# ==================== جلب بيانات سهم واحد ====================
+async def fetch_stock_data(session, symbol):
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1m&range=1d"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        async with session.get(url, headers=headers, timeout=5) as resp:
+            data = await resp.json()
+            res = data['chart']['result'][0]['meta']
+            price = res.get('regularMarketPrice')
+            vol = res.get('regularMarketVolume')
+            if price is None or vol is None or price == 0 or vol == 0:
+                return None
+            prev = res.get('previousClose', price)
+            change = ((price - prev) / prev) * 100
+            volumes = [v for v in data['chart']['result'][0]['indicators']['quote'][0]['volume'] if v]
+            price_history = [c for c in data['chart']['result'][0]['indicators']['quote'][0]['close'] if c]
+            return {
+                "symbol": symbol,
+                "price": price,
+                "volume": vol,
+                "change": change,
+                "volumes": volumes,
+                "price_history": price_history
+            }
+    except:
+        return None
+
+# ==================== دوال مساعدة ====================
 def get_ny_time():
     return datetime.now(pytz.timezone('America/New_York'))
 
@@ -43,43 +82,6 @@ async def send_msg(text):
         await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="Markdown")
     except Exception as e:
         print(f"خطأ في الإرسال: {e}")
-
-def get_avg_volume(symbol):
-    try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1mo"
-        r = session.get(url, timeout=5)
-        data = r.json()
-        volumes = [v for v in data['chart']['result'][0]['indicators']['quote'][0]['volume'] if v]
-        if len(volumes) >= 20:
-            return sum(volumes[-20:]) / 20
-    except:
-        pass
-    return 500000
-
-def fetch_stock_data(symbol):
-    try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1m&range=1d"
-        r = session.get(url, timeout=5)
-        data = r.json()
-        res = data['chart']['result'][0]['meta']
-        price = res.get('regularMarketPrice')
-        vol = res.get('regularMarketVolume')
-        if price is None or vol is None or price == 0 or vol == 0:
-            return None
-        prev = res.get('previousClose', price)
-        change = ((price - prev) / prev) * 100
-        volumes = [v for v in data['chart']['result'][0]['indicators']['quote'][0]['volume'] if v]
-        price_history = [c for c in data['chart']['result'][0]['indicators']['quote'][0]['close'] if c]
-        return {
-            "price": price,
-            "volume": vol,
-            "change": change,
-            "volumes": volumes,
-            "price_history": price_history
-        }
-    except Exception as e:
-        print(f"خطأ في {symbol}: {e}")
-        return None
 
 def is_volume_accelerating(volumes):
     if len(volumes) < 6:
@@ -126,55 +128,59 @@ async def send_alert(symbol, price, change, volume_ratio, alert_num):
     )
     await send_msg(msg)
 
+# ==================== الحلقة الرئيسية ====================
 async def main():
-    await send_msg("✅ *نظام الرصد الذكي (مقاوم للحظر) يعمل الآن*")
+    await send_msg("✅ *نظام الرصد الشامل (غير متزامن) يعمل الآن*")
     print("--- البوت يعمل ---")
-    
-    while True:
-        if not is_market_active():
-            print("⏸️ عطلة نهاية الأسبوع. إيقاف الفحص...")
-            last_values.clear()
-            alert_counters.clear()
-            await asyncio.sleep(3600)
-            continue
-        
-        stocks = ["RIVN", "LCID", "QS", "CLOV", "WKHS", "MULN", "PLTR", "SOFI", "BB", "HUT"]
-        for symbol in stocks:
-            data = fetch_stock_data(symbol)
-            if not data:
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            if not is_market_active():
+                print("⏸️ عطلة نهاية الأسبوع. إيقاف الفحص...")
+                last_values.clear()
+                alert_counters.clear()
+                await asyncio.sleep(3600)
                 continue
-            
-            price = data["price"]
-            volume = data["volume"]
-            change = data["change"]
-            volumes = data["volumes"]
-            price_history = data["price_history"]
-            
-            if price < MIN_PRICE or price > MAX_PRICE or volume < MIN_VOLUME:
-                continue
-            
-            if symbol not in avg_volume_cache:
-                avg_volume_cache[symbol] = get_avg_volume(symbol)
-            avg_vol = avg_volume_cache[symbol]
-            volume_ratio = volume / avg_vol if avg_vol > 0 else 1.0
-            
-            momentum_acc = calculate_momentum_acceleration(price_history)
-            vol_acc = is_volume_accelerating(volumes)
-            
-            if symbol not in last_values:
-                if change >= MIN_CHANGE and momentum_acc > 0 and vol_acc:
-                    last_values[symbol] = {"price": price, "change": change, "rel_vol": volume_ratio}
-                    alert_counters[symbol] = 1
-                    await send_alert(symbol, price, change, volume_ratio, 1)
-            else:
-                if price >= last_values[symbol]["price"] * (1 + UPDATE_THRESHOLD):
-                    last_values[symbol] = {"price": price, "change": change, "rel_vol": volume_ratio}
-                    alert_counters[symbol] = alert_counters.get(symbol, 0) + 1
-                    await send_alert(symbol, price, change, volume_ratio, alert_counters[symbol])
-            
-            await asyncio.sleep(random.uniform(0.5, 1.0))  # تأخير ذكي
-        
-        await asyncio.sleep(10)
+
+            print("📡 جاري جلب قائمة الأسهم...")
+            tickers = await fetch_all_tickers(session)
+            print(f"✅ تم جلب {len(tickers)} سهماً")
+
+            tasks = [fetch_stock_data(session, ticker) for ticker in tickers[:100]]  # حد 100 سهم لتجنب الحظر
+            results = await asyncio.gather(*tasks)
+
+            for data in results:
+                if not data:
+                    continue
+
+                symbol = data["symbol"]
+                price = data["price"]
+                volume = data["volume"]
+                change = data["change"]
+                volumes = data["volumes"]
+                price_history = data["price_history"]
+
+                if price < MIN_PRICE or price > MAX_PRICE or volume < MIN_VOLUME:
+                    continue
+
+                volume_ratio = 1.0  # تبسيط (يمكن تحسينه)
+                momentum_acc = calculate_momentum_acceleration(price_history)
+                vol_acc = is_volume_accelerating(volumes)
+
+                if symbol not in last_values:
+                    if change >= MIN_CHANGE and momentum_acc > 0 and vol_acc:
+                        last_values[symbol] = {"price": price, "change": change}
+                        alert_counters[symbol] = 1
+                        await send_alert(symbol, price, change, volume_ratio, 1)
+                else:
+                    if price >= last_values[symbol]["price"] * (1 + UPDATE_THRESHOLD):
+                        last_values[symbol] = {"price": price, "change": change}
+                        alert_counters[symbol] = alert_counters.get(symbol, 0) + 1
+                        await send_alert(symbol, price, change, volume_ratio, alert_counters[symbol])
+
+                await asyncio.sleep(random.uniform(0.1, 0.3))
+
+            await asyncio.sleep(30)
 
 if __name__ == "__main__":
     asyncio.run(main())
