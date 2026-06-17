@@ -11,14 +11,15 @@ TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 bot = Bot(token=TOKEN)
 
-# ==================== المعايير الاحترافية ====================
+# ==================== المعايير الاحترافية (الصيد المبكر) ====================
 MIN_PRICE = 0.5
 MAX_PRICE = 8.0
-MIN_CHANGE = 2.0
-MIN_REL_VOL = 3.0
-MIN_VOL_ACC = 2.5
-MIN_TRADE_VALUE = 2_000_000
-MIN_TURNOVER = 10.0
+MIN_CHANGE = 1.5
+MIN_REL_VOL = 2.5
+MIN_VOL_ACC = 2.0
+MIN_TRADE_VALUE = 1_000_000
+MIN_TURNOVER = 5.0
+MIN_VOLUME = 100_000
 MIN_MOMENTUM_ACC = 0.0
 UPDATE_THRESHOLD = 0.03
 
@@ -41,11 +42,11 @@ async def send_msg(text):
 
 def calculate_success_rate(change, rel_vol, vol_acc, trade_value, turnover):
     score = 0
-    score += min(change * 10, 35)
+    score += min(change * 10, 30)
     score += min(rel_vol * 8, 25)
     score += min(vol_acc * 7, 20)
-    score += 10 if trade_value > 2_000_000 else 5
-    score += 10 if turnover > 10 else 5
+    score += 15 if trade_value > 1_000_000 else 10
+    score += 10 if turnover > 5 else 5
     if score >= 85:
         return "85% - 95%"
     elif score >= 70:
@@ -81,7 +82,7 @@ async def fetch_stock_data(session, symbol):
             res = data['chart']['result'][0]['meta']
             price = res.get('regularMarketPrice')
             vol = res.get('regularMarketVolume')
-            if not price or not vol:
+            if not price or not vol or vol < MIN_VOLUME:
                 return None
             prev = res.get('previousClose', price)
             change = ((price - prev) / prev) * 100
@@ -112,7 +113,7 @@ def calculate_momentum_acc(price_history):
     c2 = (price_history[-2] - price_history[-3]) / price_history[-3] * 100
     return c1 - c2
 
-# ==================== إرسال التنبيه (النموذج المثالي) ====================
+# ==================== إرسال التنبيه (نموذج 13-15 سطر) ====================
 async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turnover, alert_num):
     success_rate = calculate_success_rate(change, rel_vol, vol_acc, trade_value, turnover)
     target1 = price * 1.05
@@ -121,23 +122,26 @@ async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turno
     stop = price * 0.97
     now = get_ny_time().strftime("%H:%M:%S")
     
-    update_type = "تحديث زخم" if alert_num > 1 else "تنبيه أولي"
+    update_type = "تحديث زخم - دخول مع إعادة الاختبار" if alert_num > 1 else "تنبيه أولي - مراقبة"
     
     msg = (
-        f"🔥 *M60 Hunter*\n\n"
-        f"⏰ `{now}`\n"
-        f"🔴 `{symbol}` | 📊 `#{alert_num}`\n\n"
-        f"💰 السعر: `{price:.2f}` | 📈 الصعود: `+{change:.2f}%`\n"
-        f"📊 الحجم: `{rel_vol:.1f}x` | 🚀 التسارع: `{vol_acc:.1f}x` | 💵 القيمة: `{trade_value/1_000_000:.2f}M`\n\n"
-        f"🎯 الأهداف: `{target1:.2f}` | `{target2:.2f}` | `{target3:.2f}`\n"
-        f"🛑 الوقف: `{stop:.2f}` | 📈 النجاح: `{success_rate}`\n\n"
-        f"📌 {update_type} - دخول مع إعادة الاختبار"
+        f"🔥 *M60 Hunter - صيد مبكر*\n\n"
+        f"⏰ *الوقت:* `{now}`\n"
+        f"🔴 *الرمز:* `{symbol}` | 📊 *رقم التنبيه:* `#{alert_num}`\n\n"
+        f"💰 *السعر:* `{price:.2f}`     📈 *الصعود:* `+{change:.2f}%`\n"
+        f"📊 *الحجم:* `{rel_vol:.1f}x`     🚀 *التسارع:* `{vol_acc:.1f}x`\n"
+        f"💵 *القيمة:* `{trade_value/1_000_000:.2f}M`   📊 *الدوران:* `{turnover:.1f}%`\n\n"
+        f"🎯 *الأهداف:* `{target1:.2f}` | `{target2:.2f}` | `{target3:.2f}`\n"
+        f"🛑 *وقف الخسارة:* `{stop:.2f}`\n"
+        f"📈 *نسبة النجاح:* `{success_rate}`\n\n"
+        f"📌 *توصية:* {update_type}\n"
+        f"✨ *M60 Hunter*"
     )
     await send_msg(msg)
 
 # ==================== الحلقة الرئيسية ====================
 async def main():
-    await send_msg("✅ *M60 Hunter يعمل الآن*")
+    await send_msg("✅ *M60 Hunter - صيد مبكر مع سيولة حقيقية*")
     print("--- البوت يعمل ---")
 
     async with aiohttp.ClientSession() as session:
