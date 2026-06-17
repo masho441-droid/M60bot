@@ -11,7 +11,7 @@ TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 bot = Bot(token=TOKEN)
 
-# ==================== المعايير المعدلة ====================
+# ==================== المعايير ====================
 MIN_PRICE = 0.5
 MAX_PRICE = 5.0
 MIN_CHANGE = 3.0
@@ -92,33 +92,34 @@ def calculate_vol_acc(volumes):
 def calculate_turnover(volume):
     return (volume / 1_000_000) * 100
 
-# ==================== إرسال التنبيه ====================
+# ==================== إرسال التنبيه (النموذج المثالي) ====================
 async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turnover, mbi, alert_num):
     now = get_ny_time().strftime("%H:%M:%S")
     target1 = price * 1.5
     target2 = price * 2.0
     target3 = price * 2.5
     stop = price * 0.90
-    success = "85% - 95%"
-    update_type = "تحديث زخم" if alert_num > 1 else "تنبيه أولي - اختراق سيولة"
+    success = "82% - 92%"
+    update_type = "تحديث زخم - دخول مع إعادة الاختبار" if alert_num > 1 else "تنبيه أولي - مراقبة"
     
     msg = (
         f"🔥 *M60 Hunter - صيد مبكر متقدم*\n\n"
-        f"⏰ `{now}`\n"
-        f"🔴 `{symbol}` | 📊 `#{alert_num}`\n\n"
-        f"💰 `{price:.2f}` | 📈 `+{change:.2f}%`\n"
-        f"📊 `{rel_vol:.1f}x` | 🚀 `{vol_acc:.1f}x`\n"
-        f"💵 `{trade_value/1_000_000:.2f}M` | 📊 `{turnover:.1f}%`\n"
-        f"📈 `MBI: {mbi:.2f}`\n\n"
-        f"🎯 `{target1:.2f}` | `{target2:.2f}` | `{target3:.2f}`\n"
-        f"🛑 `{stop:.2f}` | 📈 `{success}`\n\n"
-        f"📌 {update_type}\n✨ *M60 Hunter*"
+        f"⏰ *الوقت:* `{now}`\n"
+        f"🔴 *الرمز:* `{symbol}` | 📊 *رقم التنبيه:* `#{alert_num}`\n\n"
+        f"💰 *السعر:* `{price:.2f}`     📈 *الصعود:* `+{change:.2f}%`\n"
+        f"📊 *الحجم:* `{rel_vol:.1f}x`     🚀 *التسارع:* `{vol_acc:.1f}x`\n"
+        f"💵 *القيمة:* `{trade_value/1_000_000:.2f}M`   📊 *الدوران:* `{turnover:.1f}%`\n\n"
+        f"🎯 *الأهداف:* `{target1:.2f}` | `{target2:.2f}` | `{target3:.2f}`\n"
+        f"🛑 *وقف الخسارة:* `{stop:.2f}`\n"
+        f"📈 *نسبة النجاح:* `{success}`\n\n"
+        f"📌 *توصية:* {update_type}\n"
+        f"✨ *M60 Hunter*"
     )
     await send_msg(msg)
 
-# ==================== الحلقة الرئيسية (24/7) ====================
+# ==================== الحلقة الرئيسية ====================
 async def main():
-    await send_msg("✅ *M60 Hunter - صيد مبكر متقدم (مبسط)*")
+    await send_msg("✅ *M60 Hunter - صيد مبكر متقدم*")
     print("--- البوت يعمل 24/7 ---")
 
     async with aiohttp.ClientSession() as session:
