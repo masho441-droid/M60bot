@@ -1,2 +1,2 @@
-alpaca-trade-api
+requests
 python-telegram-bot
