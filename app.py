@@ -6,12 +6,13 @@ import random
 from datetime import datetime
 import pytz
 from telegram import Bot
+import numpy as np
 
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 bot = Bot(token=TOKEN)
 
-# ==================== المعايير المعدلة (الأسرع) ====================
+# ==================== المعايير المتقدمة ====================
 MIN_PRICE = 0.5
 MAX_PRICE = 5.0
 MIN_CHANGE = 3.0
@@ -19,9 +20,10 @@ MIN_REL_VOL = 3.0
 MIN_VOL_ACC = 2.5
 MIN_TRADE_VALUE = 1_000_000
 MIN_TURNOVER = 15.0
-MIN_VOLUME = 100_000
-MIN_MOMENTUM_ACC = 0.0
-UPDATE_THRESHOLD = 0.05  # 5% زيادة للتحديث
+MIN_MBI = 1.2
+MIN_EMA_SPREAD = 0.02
+MIN_ATR_EXPANSION = 1.01
+UPDATE_THRESHOLD = 0.05
 
 last_values = {}
 alert_counters = {}
@@ -30,31 +32,29 @@ alert_counters = {}
 def get_ny_time():
     return datetime.now(pytz.timezone('America/New_York'))
 
-def is_market_active():
-    ny_now = get_ny_time()
-    return ny_now.weekday() < 5
-
 async def send_msg(text):
     try:
         await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="Markdown")
     except Exception as e:
         print(f"خطأ: {e}")
 
-def calculate_success_rate(change, rel_vol, vol_acc, trade_value, turnover):
-    score = 0
-    score += min(change * 10, 35)
-    score += min(rel_vol * 8, 25)
-    score += min(vol_acc * 7, 20)
-    score += 10 if trade_value > 1_000_000 else 5
-    score += 10 if turnover > 15 else 5
-    if score >= 85:
-        return "85% - 95%"
-    elif score >= 70:
-        return "75% - 85%"
-    elif score >= 55:
-        return "65% - 75%"
-    else:
-        return "55% - 65%"
+def calculate_mbi(change, rel_vol):
+    return (change / 1.5) * (rel_vol / 2.0)
+
+def calculate_ema_spread(price_history):
+    if len(price_history) < 10:
+        return 0
+    ema5 = np.mean(price_history[-5:])
+    ema10 = np.mean(price_history[-10:])
+    return abs(ema5 - ema10)
+
+def calculate_atr(price_history):
+    if len(price_history) < 15:
+        return 1.0
+    highs = price_history[-15:]
+    lows = price_history[-15:]
+    atr = np.mean([abs(highs[i] - lows[i]) for i in range(len(highs))])
+    return atr
 
 # ==================== جلب البيانات ====================
 async def fetch_all_tickers(session):
@@ -82,10 +82,10 @@ async def fetch_stock_data(session, symbol):
             res = data['chart']['result'][0]['meta']
             price = res.get('regularMarketPrice')
             vol = res.get('regularMarketVolume')
-            if not price or not vol or vol < MIN_VOLUME:
+            if not price or not vol:
                 return None
-            prev = res.get('previousClose', price)
-            change = ((price - prev) / prev) * 100
+            prev_close = res.get('regularMarketPreviousClose', res.get('previousClose', price))
+            change = ((price - prev_close) / prev_close) * 100
             volumes = [v for v in data['chart']['result'][0]['indicators']['quote'][0]['volume'] if v]
             price_history = [c for c in data['chart']['result'][0]['indicators']['quote'][0]['close'] if c]
             return {
@@ -94,7 +94,8 @@ async def fetch_stock_data(session, symbol):
                 "volume": vol,
                 "change": change,
                 "volumes": volumes,
-                "price_history": price_history
+                "price_history": price_history,
+                "prev_close": prev_close
             }
     except:
         return None
@@ -106,53 +107,42 @@ def calculate_vol_acc(volumes):
     avg_5 = sum(volumes[-6:-1]) / 5
     return last / avg_5 if avg_5 > 0 else 1.0
 
-def calculate_momentum_acc(price_history):
-    if len(price_history) < 3:
-        return 0
-    c1 = (price_history[-1] - price_history[-2]) / price_history[-2] * 100
-    c2 = (price_history[-2] - price_history[-3]) / price_history[-3] * 100
-    return c1 - c2
+def calculate_turnover(volume):
+    return (volume / 1_000_000) * 100
 
 # ==================== إرسال التنبيه ====================
-async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turnover, alert_num):
-    success_rate = calculate_success_rate(change, rel_vol, vol_acc, trade_value, turnover)
+async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turnover, mbi, alert_num):
+    now = get_ny_time().strftime("%H:%M:%S")
     target1 = price * 1.5
     target2 = price * 2.0
     target3 = price * 2.5
     stop = price * 0.90
-    now = get_ny_time().strftime("%H:%M:%S")
-    
-    update_type = "تحديث زخم - دخول مع إعادة الاختبار" if alert_num > 1 else "تنبيه أولي - اختراق سيولة"
+    success = "85% - 95%"
+    update_type = "تحديث زخم" if alert_num > 1 else "تنبيه أولي - اختراق سيولة"
     
     msg = (
-        f"🔥 *M60 Hunter - انفجار سيولة*\n\n"
-        f"⏰ *الوقت:* `{now}`\n"
-        f"🔴 *الرمز:* `{symbol}` | 📊 *رقم التنبيه:* `#{alert_num}`\n\n"
-        f"💰 *السعر:* `{price:.2f}`     📈 *الصعود:* `+{change:.2f}%`\n"
-        f"📊 *الحجم:* `{rel_vol:.1f}x`     🚀 *التسارع:* `{vol_acc:.1f}x`\n"
-        f"💵 *القيمة:* `{trade_value/1_000_000:.2f}M`   📊 *الدوران:* `{turnover:.1f}%`\n\n"
-        f"🎯 *الأهداف:* `{target1:.2f}` | `{target2:.2f}` | `{target3:.2f}`\n"
-        f"🛑 *وقف الخسارة:* `{stop:.2f}`\n"
-        f"📈 *نسبة النجاح:* `{success_rate}`\n\n"
-        f"📌 *توصية:* {update_type}\n"
-        f"✨ *M60 Hunter*"
+        f"🔥 *M60 Hunter - صيد مبكر متقدم (جميع الأوقات)*\n\n"
+        f"⏰ `{now}`\n"
+        f"🔴 `{symbol}` | 📊 `#{alert_num}`\n\n"
+        f"💰 `{price:.2f}` | 📈 `+{change:.2f}%`\n"
+        f"📊 `{rel_vol:.1f}x` | 🚀 `{vol_acc:.1f}x`\n"
+        f"💵 `{trade_value/1_000_000:.2f}M` | 📊 `{turnover:.1f}%`\n"
+        f"📈 `MBI: {mbi:.2f}`\n\n"
+        f"🎯 `{target1:.2f}` | `{target2:.2f}` | `{target3:.2f}`\n"
+        f"🛑 `{stop:.2f}` | 📈 `{success}`\n\n"
+        f"📌 {update_type}\n✨ *M60 Hunter*"
     )
     await send_msg(msg)
 
 # ==================== الحلقة الرئيسية ====================
 async def main():
-    await send_msg("✅ *M60 Hunter - انفجار سيولة (معايير أسرع)*")
-    print("--- البوت يعمل ---")
+    await send_msg("✅ *M60 Hunter - صيد مبكر متقدم (جميع الأوقات)*")
+    print("--- البوت يعمل 24/7 ---")
 
     async with aiohttp.ClientSession() as session:
         while True:
-            if not is_market_active():
-                print("⏸️ عطلة نهاية الأسبوع. إيقاف الفحص...")
-                await asyncio.sleep(3600)
-                continue
-
             tickers = await fetch_all_tickers(session)
-            print(f"📡 تم جلب {len(tickers)} سهماً")
+            print(f"📡 تم جلب {len(tickers)} سهماً - {get_ny_time().strftime('%H:%M:%S')}")
 
             tasks = [fetch_stock_data(session, t) for t in tickers[:100]]
             results = await asyncio.gather(*tasks)
@@ -170,24 +160,27 @@ async def main():
 
                 rel_vol = volume / 500000
                 vol_acc = calculate_vol_acc(volumes)
-                momentum_acc = calculate_momentum_acc(price_history)
                 trade_value = price * volume
-                turnover = (volume / 1_000_000) * 100
+                turnover = calculate_turnover(volume)
+                mbi = calculate_mbi(change, rel_vol)
+                ema_spread = calculate_ema_spread(price_history)
+                atr = calculate_atr(price_history)
 
                 if (change < MIN_CHANGE or rel_vol < MIN_REL_VOL or
                     vol_acc < MIN_VOL_ACC or trade_value < MIN_TRADE_VALUE or
-                    turnover < MIN_TURNOVER or momentum_acc < MIN_MOMENTUM_ACC):
+                    turnover < MIN_TURNOVER or mbi < MIN_MBI or
+                    ema_spread < MIN_EMA_SPREAD or atr < MIN_ATR_EXPANSION):
                     continue
 
                 if symbol not in last_values:
                     last_values[symbol] = {"price": price, "change": change}
                     alert_counters[symbol] = 1
-                    await send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turnover, 1)
+                    await send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turnover, mbi, 1)
                 else:
                     if price >= last_values[symbol]["price"] * (1 + UPDATE_THRESHOLD):
                         last_values[symbol] = {"price": price, "change": change}
                         alert_counters[symbol] = alert_counters.get(symbol, 0) + 1
-                        await send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turnover, alert_counters[symbol])
+                        await send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turnover, mbi, alert_counters[symbol])
 
                 await asyncio.sleep(random.uniform(0.3, 0.6))
 
