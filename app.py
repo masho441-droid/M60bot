@@ -6,48 +6,48 @@ TOKEN = "8633972708:AAGxG5GwbvvzyKPrcxAoU2hn90QJkiQttmA"
 CHAT_ID = "-1003936661851"
 bot = Bot(token=TOKEN)
 
-# --- معايير مخففة جداً للتجربة ---
-# سنوسع النطاق ليشمل كل شيء تقريباً
-MIN_PRICE, MAX_PRICE = 0.1, 500.0  # نطاق سعري واسع
-MIN_CHANGE = 0.1                   # أقل حركة (0.1%)
-MIN_REL_VOL = 0.5                  # أي سهم نشط قليلاً
-
 def fetch_stocks():
     url = "https://scanner.tradingview.com/america/scan"
-    headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
+    # تغيير الـ Headers ليكون أكثر محاكاة لمتصفح حقيقي (تجنب الحظر)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Origin": "https://www.tradingview.com",
+        "Referer": "https://www.tradingview.com/",
+        "Content-Type": "application/json"
+    }
     payload = {
         "filter": [
-            {"left": "close", "operation": "in_range", "right": [MIN_PRICE, MAX_PRICE]},
-            {"left": "change", "operation": "egreater", "right": MIN_CHANGE},
-            {"left": "relative_volume_24h", "operation": "egreater", "right": MIN_REL_VOL}
+            {"left": "close", "operation": "in_range", "right": [0.5, 20.0]},
+            {"left": "change", "operation": "egreater", "right": 0.5}
         ],
-        "columns": ["name", "close", "change", "relative_volume_24h", "volume"],
-        "options": {"lang": "en"}
+        "options": {"lang": "en"},
+        "columns": ["name", "close", "change"],
+        "sort": {"sortBy": "change", "sortOrder": "desc"},
+        "range": [0, 10]
     }
     try:
         res = requests.post(url, json=payload, headers=headers, timeout=10)
         return res.json().get("data", [])
-    except: return None
+    except Exception as e:
+        print(f"DEBUG ERROR: {e}")
+        return None
 
 async def main():
-    await bot.send_message(chat_id=CHAT_ID, text="🧪 *تم تشغيل وضع الاختبار (معايير مرنة).* سأرسل لك كل ما أجده!")
-    
+    await bot.send_message(chat_id=CHAT_ID, text="🚀 *محرك البحث الجديد يعمل.. أنتظر البيانات الآن*")
     while True:
-        stocks = fetch_stocks()
-        
-        if stocks is not None:
-            count = len(stocks)
-            if count > 0:
-                await bot.send_message(chat_id=CHAT_ID, text=f"🔍 *تم العثور على {count} سهم!* سأعرض لك أول 3 منها للتأكد من النظام:")
-                for item in stocks[:3]:
+        data = fetch_stocks()
+        if data is not None:
+            if len(data) > 0:
+                msg = "🔍 *أسهم نشطة الآن في السوق:*\n"
+                for item in data[:5]:
                     d = item["d"]
-                    await bot.send_message(chat_id=CHAT_ID, text=f"🚀 *سهم:* `{d[0]}` | السعر: `{d[1]}` | التغير: `+{d[2]}%`")
+                    msg += f"• `{d[0]}`: {d[1]}$ (+{d[2]}%)\n"
+                await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
             else:
-                await bot.send_message(chat_id=CHAT_ID, text="❌ *لا توجد أسهم حالياً.*")
+                await bot.send_message(chat_id=CHAT_ID, text="⚠️ *البوت متصل ولكن لا توجد أسهم تطابق الفلتر البسيط.*")
         else:
-            await bot.send_message(chat_id=CHAT_ID, text="⚠️ *فشل الاتصال.*")
-            
-        await asyncio.sleep(120) # الفحص كل دقيقتين
+            await bot.send_message(chat_id=CHAT_ID, text="❌ *فشل الاتصال بسيرفر البيانات.*")
+        await asyncio.sleep(60)
 
 if __name__ == "__main__":
     asyncio.run(main())
