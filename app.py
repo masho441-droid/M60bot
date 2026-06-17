@@ -1,6 +1,5 @@
 import asyncio
-import time
-import requests
+import yfinance as yf
 from datetime import datetime
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -9,12 +8,28 @@ TOKEN = "8633972708:AAGxG5GwbvvzyKPrcxAoU2hn90QJkiQttmA"
 CHAT_ID = "-1003936661851"
 bot = Bot(token=TOKEN)
 
+# ==================== قائمة موسعة (NASDAQ 100 + S&P 500) ====================
+TICKERS = [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AVGO", "JPM", "V",
+    "WMT", "JNJ", "PG", "UNH", "HD", "MA", "DIS", "ADBE", "NFLX", "CRM",
+    "AMD", "INTC", "PEP", "COST", "CSCO", "ABT", "TMO", "ACN", "NKE", "QCOM",
+    "IBM", "ORCL", "TXN", "AMAT", "LRCX", "MU", "ADI", "SNPS", "CDNS",
+    "SBUX", "BKNG", "MDLZ", "CMCSA", "F", "GE", "BA", "CAT", "CVX", "XOM",
+    "KO", "PFE", "MRK", "LLY", "ABBV", "BMY", "AMGN", "GILD", "REGN", "VRTX",
+    "SPGI", "ICE", "MCO", "ADP", "PAYX", "CTSH", "C", "GS", "MS", "SCHW",
+    "BLK", "BK", "TFC", "USB", "PNC", "COF", "AXP", "COF", "DHR", "DE",
+    "HON", "MMM", "UPS", "RTX", "LMT", "NOC", "GD", "T", "TMUS", "CCI",
+    "PLD", "WELL", "SPG", "PSA", "O", "DOC", "DUK", "SO", "NEE", "D",
+    "AEP", "EXC", "ED", "AWK", "PEG", "XEL", "CL", "KMB", "PM", "MO",
+    "STZ", "MNST", "TAP", "BF.B", "SAM", "MKC", "HUM", "CI", "CNC", "ANTM",
+    "MOH", "AET", "CVS", "WBA", "ABC", "TGT", "LOW", "M", "KSS", "JWN",
+    "TJX", "ROST", "DG", "DLTR", "EBAY", "ETSY", "EXPE", "TRIP"
+]
+
 # ==================== المعايير ====================
-MIN_PRICE = 0.5
-MAX_PRICE = 6.0
-MIN_CHANGE = 0.5
-MIN_REL_VOL = 1.0
-MIN_TRADE_VALUE = 50000
+MIN_CHANGE = 1.0
+MIN_REL_VOL = 1.5
+MIN_TRADE_VALUE = 100000
 
 last_values = {}
 alert_counters = {}
@@ -25,46 +40,32 @@ async def send_msg(text):
     except Exception as e:
         print(f"خطأ: {e}")
 
-def fetch_stocks():
-    url = "https://scanner.tradingview.com/america/scan"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "filter": [
-            {"left": "close", "operation": "in_range", "right": [MIN_PRICE, MAX_PRICE]},
-            {"left": "change", "operation": "egreater", "right": MIN_CHANGE},
-            {"left": "relative_volume_24h", "operation": "egreater", "right": MIN_REL_VOL},
-            {"left": "exchange", "operation": "in_range", "right": ["NASDAQ", "NYSE", "AMEX"]}
-        ],
-        "options": {"lang": "en"},
-        "symbols": {"query": {"types": []}, "tickers": []},
-        "columns": ["name", "close", "change", "relative_volume_24h", "volume"]
-    }
+def get_stock_data(symbol):
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=10)
-        data = response.json()
-        stocks = []
-        for item in data.get("data", []):
-            d = item["d"]
-            if len(d) >= 5 and all(v is not None for v in d):
-                price = d[1]
-                volume = d[4]
-                trade_value = price * volume
-                if trade_value >= MIN_TRADE_VALUE:
-                    stocks.append({
-                        "symbol": d[0],
-                        "price": price,
-                        "change": d[2],
-                        "rel_vol": d[3],
-                        "volume": volume,
-                        "trade_value": trade_value
-                    })
-        return stocks
+        stock = yf.Ticker(symbol)
+        data = stock.history(period="2d")
+        if len(data) < 2:
+            return None
+        prev_close = data['Close'].iloc[-2]
+        current = data.iloc[-1]
+        price = current['Close']
+        volume = current['Volume']
+        change = ((price - prev_close) / prev_close) * 100
+        avg_volume = data['Volume'].mean()
+        rel_vol = volume / avg_volume if avg_volume > 0 else 1
+        trade_value = price * volume
+        if change >= MIN_CHANGE and rel_vol >= MIN_REL_VOL and trade_value >= MIN_TRADE_VALUE:
+            return {
+                "symbol": symbol,
+                "price": price,
+                "change": change,
+                "rel_vol": rel_vol,
+                "volume": volume,
+                "trade_value": trade_value
+            }
     except Exception as e:
-        print(f"خطأ في جلب البيانات: {e}")
-        return []
+        print(f"خطأ في {symbol}: {e}")
+    return None
 
 def calculate_strength(change, rel_vol, trade_value):
     score = min(change * 10, 35) + min(rel_vol * 12, 30)
@@ -98,7 +99,6 @@ def get_strength_text(strength):
     else:
         return "👀 متوسطة"
 
-# ==================== منع التكرار (معلق حالياً) ====================
 def should_send_update(symbol, rel_vol, change):
     if symbol not in last_values:
         return True
@@ -109,8 +109,8 @@ def should_send_update(symbol, rel_vol, change):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "✅ *البوت جاهز ويعمل الآن*\n\n"
-        "📊 يراقب جميع الأسهم الأمريكية\n"
+        "✅ *البوت جاهز ويعمل الآن (Yahoo Finance)*\n\n"
+        f"📊 يراقب {len(TICKERS)} سهماً\n"
         "🔍 يبحث عن اختراقات وفق المعايير\n"
         "📈 يرسل جميع الإشارات مع متابعة الأسهم\n\n"
         "🚀 تداول موفق",
@@ -121,13 +121,13 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"📊 *حالة البوت*\n"
         f"✅ يعمل\n"
-        f"⏱️ فحص كل 30 ثانية\n"
+        f"⏱️ فحص كل 60 ثانية\n"
         f"📈 عدد التنبيهات: {sum(alert_counters.values())}",
         parse_mode="Markdown"
     )
 
 async def main():
-    await send_msg("✅ *تم تشغيل نظام رصد الاختراقات بنجاح!*")
+    await send_msg("✅ *تم تشغيل نظام رصد الاختراقات (Yahoo Finance) بنجاح!*")
     print("--- البوت يعمل ---")
 
     app = Application.builder().token(TOKEN).build()
@@ -139,17 +139,22 @@ async def main():
     print("--- أوامر البوت مفعلة ---")
 
     while True:
-        stocks = fetch_stocks()
-        if not stocks:
+        candidates = []
+        for symbol in TICKERS:
+            stock = get_stock_data(symbol)
+            if stock:
+                candidates.append(stock)
+
+        if not candidates:
             print("لا توجد فرص حالياً.")
-            await asyncio.sleep(30)
+            await asyncio.sleep(60)
             continue
 
-        print(f"تم العثور على {len(stocks)} فرصة")
-        for stock in stocks:
-            # ==================== تم تعطيل شرط منع التكرار ====================
-            # if not should_send_update(stock['symbol'], stock['rel_vol'], stock['change']):
-            #     continue
+        candidates.sort(key=lambda x: x["rel_vol"], reverse=True)
+
+        for stock in candidates[:5]:
+            if not should_send_update(stock['symbol'], stock['rel_vol'], stock['change']):
+                continue
 
             last_values[stock['symbol']] = {"rel_vol": stock['rel_vol'], "change": stock['change']}
             alert_counters[stock['symbol']] = alert_counters.get(stock['symbol'], 0) + 1
@@ -179,7 +184,7 @@ async def main():
             await send_msg(msg)
             await asyncio.sleep(0.5)
 
-        await asyncio.sleep(30)
+        await asyncio.sleep(60)
 
 if __name__ == "__main__":
     asyncio.run(main())
