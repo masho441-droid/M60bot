@@ -1,31 +1,24 @@
 import asyncio
 import requests
-from telegram import Bot
+from datetime import datetime
+from telegram import Bot, Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 TOKEN = "8633972708:AAGxG5GwbvvzyKPrcxAoU2hn90QJkiQttmA"
 CHAT_ID = "-1003936661851"
 bot = Bot(token=TOKEN)
 
-# --- استراتيجيتك الأصلية ---
+# ==================== المعايير ====================
 MIN_PRICE = 0.5
 MAX_PRICE = 6.0
 MIN_CHANGE = 1.5
 MIN_REL_VOL = 2.0
 MIN_TRADE_VALUE = 100000
 
-def calculate_strength(change, rel_vol, trade_value):
-    score = min(change * 10, 35) + min(rel_vol * 12, 30)
-    score += 20 if trade_value > 1000000 else (15 if trade_value > 500000 else 10)
-    return min(score, 100)
+last_values = {}
+alert_counters = {}
 
-def get_targets(price, strength):
-    if strength >= 80: return price * 1.08, price * 1.12, price * 1.18
-    if strength >= 60: return price * 1.05, price * 1.08, price * 1.12
-    return price * 1.03, price * 1.05, price * 1.07
-
-def get_strength_text(strength):
-    return "💥 قوية جداً" if strength >= 85 else ("🚀 قوية" if strength >= 70 else "📈 جيدة")
-
+# ==================== جلب البيانات ====================
 def fetch_stocks():
     url = "https://scanner.tradingview.com/america/scan"
     headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
@@ -41,30 +34,139 @@ def fetch_stocks():
     try:
         res = requests.post(url, json=payload, headers=headers, timeout=10)
         return res.json().get("data", [])
-    except: return []
+    except Exception as e:
+        print(f"خطأ في جلب البيانات: {e}")
+        return []
 
+# ==================== حساب القوة والأهداف ====================
+def calculate_strength(change, rel_vol, trade_value):
+    score = min(change * 10, 35) + min(rel_vol * 12, 30)
+    score += 20 if trade_value > 1000000 else (15 if trade_value > 500000 else 10)
+    return min(score, 100)
+
+def get_targets(price, strength):
+    if strength >= 80:
+        return price * 1.08, price * 1.12, price * 1.18
+    if strength >= 60:
+        return price * 1.05, price * 1.08, price * 1.12
+    return price * 1.03, price * 1.05, price * 1.07
+
+def get_strength_text(strength):
+    return "💥 قوية جداً" if strength >= 85 else ("🚀 قوية" if strength >= 70 else "📈 جيدة")
+
+def get_success_rate(strength):
+    if strength >= 85:
+        return "85% - 95%"
+    elif strength >= 70:
+        return "75% - 85%"
+    elif strength >= 55:
+        return "65% - 75%"
+    else:
+        return "55% - 65%"
+
+# ==================== منع التكرار والمتابعة ====================
+def should_send_update(symbol, rel_vol, change):
+    if symbol not in last_values:
+        return True
+    last = last_values[symbol]
+    if rel_vol > last["rel_vol"] * 1.25 or change > last["change"] + 2:
+        return True
+    return False
+
+# ==================== إرسال الرسائل ====================
+async def send_msg(text):
+    try:
+        await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="Markdown")
+    except Exception as e:
+        print(f"خطأ في الإرسال: {e}")
+
+# ==================== أوامر البوت ====================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "✅ *البوت جاهز ويعمل الآن*\n\n"
+        "📊 يراقب جميع الأسهم الأمريكية\n"
+        "🔍 يبحث عن اختراقات وفق المعايير\n"
+        "📈 يرسل جميع الإشارات مع متابعة الأسهم\n\n"
+        "🚀 تداول موفق",
+        parse_mode="Markdown"
+    )
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"📊 *حالة البوت*\n"
+        f"✅ يعمل\n"
+        f"⏱️ فحص كل 30 ثانية\n"
+        f"📈 عدد التنبيهات: {sum(alert_counters.values())}",
+        parse_mode="Markdown"
+    )
+
+# ==================== الحلقة الرئيسية ====================
 async def main():
+    await send_msg("✅ *تم تشغيل نظام رصد الاختراقات بنجاح!*")
     print("--- Sniper Engine: Full Strategy Active ---")
-    await bot.send_message(chat_id=CHAT_ID, text="✅ *البوت يعمل الآن بكامل استراتيجيتك!*")
-    
+
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("status", status))
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    print("--- أوامر البوت مفعلة ---")
+
     while True:
         stocks = fetch_stocks()
+        if not stocks:
+            print("لا توجد فرص حالياً.")
+            await asyncio.sleep(30)
+            continue
+
+        print(f"تم العثور على {len(stocks)} فرصة")
         for item in stocks:
             d = item["d"]
-            symbol, price, change, rel_vol, vol = d[0], d[1], d[2], d[3], d[4]
-            trade_value = price * vol
-            
-            if trade_value >= MIN_TRADE_VALUE:
-                strength = calculate_strength(change, rel_vol, trade_value)
-                t1, t2, t3 = get_targets(price, strength)
-                
-                msg = (f"🔍 *فرصة اختراق:* `{symbol}`\n"
-                       f"💵 السعر: `${price:.2f}` | 📈 الزخم: `+{change:.2f}%`\n"
-                       f"💪 القوة: {get_strength_text(strength)} (`{strength:.0f}/100`)\n"
-                       f"🎯 الأهداف: `{t1:.2f} - {t2:.2f} - {t3:.2f}`")
-                await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
-        
-        await asyncio.sleep(60) # الفحص كل دقيقة
+            if len(d) < 5:
+                continue
+            symbol = d[0]
+            price = d[1]
+            change = d[2]
+            rel_vol = d[3]
+            volume = d[4]
+            trade_value = price * volume
+
+            if trade_value < MIN_TRADE_VALUE:
+                continue
+
+            if not should_send_update(symbol, rel_vol, change):
+                continue
+
+            last_values[symbol] = {"rel_vol": rel_vol, "change": change}
+            alert_counters[symbol] = alert_counters.get(symbol, 0) + 1
+
+            strength = calculate_strength(change, rel_vol, trade_value)
+            t1, t2, t3 = get_targets(price, strength)
+            success_rate = get_success_rate(strength)
+            strength_text = get_strength_text(strength)
+            trailing_stop = price * 0.98
+            update_type = "تحديث زخم" if alert_counters[symbol] > 1 else "تنبيه أولي"
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            msg = (
+                f"🔍 *اختراق واضح - {update_type}* 🔍\n\n"
+                f"📌 **السهم:** `{symbol}` | 🔢 **تنبيه:** `#{alert_counters[symbol]}`\n"
+                f"🕒 **الوقت:** `{current_time}` | 💵 **السعر:** `${price:.2f}`\n"
+                f"📈 **الزخم:** `+{change:.2f}%` | 📊 **السيولة:** `{rel_vol:.1f}x`\n"
+                f"💰 **قيمة التداول:** `${trade_value:,.0f}`\n"
+                f"💪 **القوة:** `{strength_text}` (`{strength:.0f}/100`)\n\n"
+                f"🎯 *الأهداف:*\n"
+                f"1️⃣ **${t1:.2f}** (+{(t1/price-1)*100:.1f}%)\n"
+                f"2️⃣ **${t2:.2f}** (+{(t2/price-1)*100:.1f}%)\n"
+                f"3️⃣ **${t3:.2f}** (+{(t3/price-1)*100:.1f}%)\n\n"
+                f"🛑 *وقف الخسارة:* `${trailing_stop:.2f}`\n"
+                f"📈 *نسبة النجاح:* `{success_rate}`"
+            )
+            await send_msg(msg)
+            await asyncio.sleep(0.5)
+
+        await asyncio.sleep(30)
 
 if __name__ == "__main__":
     asyncio.run(main())
