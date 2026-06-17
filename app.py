@@ -6,13 +6,12 @@ import random
 from datetime import datetime
 import pytz
 from telegram import Bot
-import numpy as np
 
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 bot = Bot(token=TOKEN)
 
-# ==================== المعايير المتقدمة ====================
+# ==================== المعايير المعدلة ====================
 MIN_PRICE = 0.5
 MAX_PRICE = 5.0
 MIN_CHANGE = 3.0
@@ -21,8 +20,6 @@ MIN_VOL_ACC = 2.5
 MIN_TRADE_VALUE = 1_000_000
 MIN_TURNOVER = 15.0
 MIN_MBI = 1.2
-MIN_EMA_SPREAD = 0.02
-MIN_ATR_EXPANSION = 1.01
 UPDATE_THRESHOLD = 0.05
 
 last_values = {}
@@ -32,12 +29,6 @@ alert_counters = {}
 def get_ny_time():
     return datetime.now(pytz.timezone('America/New_York'))
 
-def is_regular_trading():
-    ny_now = get_ny_time()
-    open_time = ny_now.replace(hour=9, minute=30, second=0)
-    close_time = ny_now.replace(hour=16, minute=0, second=0)
-    return open_time <= ny_now <= close_time
-
 async def send_msg(text):
     try:
         await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="Markdown")
@@ -46,21 +37,6 @@ async def send_msg(text):
 
 def calculate_mbi(change, rel_vol):
     return (change / 1.5) * (rel_vol / 2.0)
-
-def calculate_ema_spread(price_history):
-    if len(price_history) < 10:
-        return 0
-    ema5 = np.mean(price_history[-5:])
-    ema10 = np.mean(price_history[-10:])
-    return abs(ema5 - ema10)
-
-def calculate_atr(price_history):
-    if len(price_history) < 15:
-        return 1.0
-    highs = price_history[-15:]
-    lows = price_history[-15:]
-    atr = np.mean([abs(highs[i] - lows[i]) for i in range(len(highs))])
-    return atr
 
 # ==================== جلب البيانات ====================
 async def fetch_all_tickers(session):
@@ -140,18 +116,13 @@ async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turno
     )
     await send_msg(msg)
 
-# ==================== الحلقة الرئيسية ====================
+# ==================== الحلقة الرئيسية (24/7) ====================
 async def main():
-    await send_msg("✅ *M60 Hunter - صيد مبكر متقدم*")
-    print("--- البوت يعمل ---")
+    await send_msg("✅ *M60 Hunter - صيد مبكر متقدم (مبسط)*")
+    print("--- البوت يعمل 24/7 ---")
 
     async with aiohttp.ClientSession() as session:
         while True:
-            if not is_regular_trading():
-                print("⏸️ خارج ساعات التداول العادي. إيقاف الفحص...")
-                await asyncio.sleep(60)
-                continue
-
             tickers = await fetch_all_tickers(session)
             print(f"📡 تم جلب {len(tickers)} سهماً")
 
@@ -174,13 +145,10 @@ async def main():
                 trade_value = price * volume
                 turnover = calculate_turnover(volume)
                 mbi = calculate_mbi(change, rel_vol)
-                ema_spread = calculate_ema_spread(price_history)
-                atr = calculate_atr(price_history)
 
                 if (change < MIN_CHANGE or rel_vol < MIN_REL_VOL or
                     vol_acc < MIN_VOL_ACC or trade_value < MIN_TRADE_VALUE or
-                    turnover < MIN_TURNOVER or mbi < MIN_MBI or
-                    ema_spread < MIN_EMA_SPREAD or atr < MIN_ATR_EXPANSION):
+                    turnover < MIN_TURNOVER or mbi < MIN_MBI):
                     continue
 
                 if symbol not in last_values:
