@@ -14,13 +14,13 @@ bot = Bot(token=TOKEN)
 # ==================== المعايير الاحترافية ====================
 MIN_PRICE = 0.5
 MAX_PRICE = 8.0
-MIN_CHANGE = 1.0
-MIN_REL_VOL = 2.5
-MIN_VOL_ACC = 2.0
-MIN_TRADE_VALUE = 1_000_000
+MIN_CHANGE = 2.0
+MIN_REL_VOL = 3.0
+MIN_VOL_ACC = 2.5
+MIN_TRADE_VALUE = 2_000_000
+MIN_TURNOVER = 10.0
 MIN_MOMENTUM_ACC = 0.0
-
-UPDATE_THRESHOLD = 0.03  # 3% زيادة للتحديث
+UPDATE_THRESHOLD = 0.03
 
 last_values = {}
 alert_counters = {}
@@ -39,22 +39,21 @@ async def send_msg(text):
     except Exception as e:
         print(f"خطأ: {e}")
 
-def calculate_success_rate(change, rel_vol, vol_acc, trade_value):
+def calculate_success_rate(change, rel_vol, vol_acc, trade_value, turnover):
     score = 0
-    score += min(change * 10, 30)          # الزخم (max 30)
-    score += min(rel_vol * 10, 25)         # السيولة (max 25)
-    score += min(vol_acc * 8, 20)          # تسارع السيولة (max 20)
-    score += 10 if trade_value > 1_000_000 else 5
-    score += 5 if vol_acc > 2.5 else 0
-    
+    score += min(change * 10, 35)
+    score += min(rel_vol * 8, 25)
+    score += min(vol_acc * 7, 20)
+    score += 10 if trade_value > 2_000_000 else 5
+    score += 10 if turnover > 10 else 5
     if score >= 85:
-        return "85% - 95%", "💥 قوية جداً"
+        return "85% - 95%"
     elif score >= 70:
-        return "75% - 85%", "🚀 قوية"
+        return "75% - 85%"
     elif score >= 55:
-        return "65% - 75%", "📈 جيدة"
+        return "65% - 75%"
     else:
-        return "55% - 65%", "👀 متوسطة"
+        return "55% - 65%"
 
 # ==================== جلب البيانات ====================
 async def fetch_all_tickers(session):
@@ -113,42 +112,32 @@ def calculate_momentum_acc(price_history):
     c2 = (price_history[-2] - price_history[-3]) / price_history[-3] * 100
     return c1 - c2
 
-# ==================== إرسال التنبيه ====================
-async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, alert_num):
-    success_rate, strength = calculate_success_rate(change, rel_vol, vol_acc, trade_value)
+# ==================== إرسال التنبيه (نموذج مختصر) ====================
+async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turnover, alert_num):
+    success_rate = calculate_success_rate(change, rel_vol, vol_acc, trade_value, turnover)
     target1 = price * 1.05
     target2 = price * 1.08
     target3 = price * 1.12
     stop = price * 0.97
+    now = get_ny_time().strftime("%H:%M:%S")
+    
+    update_type = "تحديث زخم" if alert_num > 1 else "تنبيه أولي"
     
     msg = (
-        f"🔥 *إشارة اختراق حقيقي - M60 Hunter* 🔥\n\n"
-        f"⏰ *الوقت:* {get_ny_time().strftime('%H:%M:%S')}\n"
-        f"🔴 *الرمز:* {symbol}\n"
-        f"📊 *رقم التنبيه:* {alert_num}\n\n"
-        f"💰 *السعر:* ${price:.2f}\n"
-        f"📈 *الزخم:* +{change:.2f}%\n"
-        f"📊 *الحجم النسبي:* {rel_vol:.1f}x\n"
-        f"🚀 *تسارع السيولة:* {vol_acc:.1f}x\n"
-        f"💵 *قيمة التداول:* ${trade_value:,.0f}\n\n"
-        f"📊 *تحليل السيولة:*\n"
-        f"• دخول سيولة حقيقي: ✅\n"
-        f"• تسارع الشراء: ✅\n"
-        f"• عرض/طلب: ✅ (فارق ضيق)\n\n"
-        f"🎯 *الأهداف المتوقعة:*\n"
-        f"🟢 *الهدف الأول:* ${target1:.2f} (+5.0%)\n"
-        f"🟡 *الهدف الثاني:* ${target2:.2f} (+8.0%)\n"
-        f"🔴 *الهدف الثالث:* ${target3:.2f} (+12.0%)\n\n"
-        f"🛑 *وقف الخسارة:* ${stop:.2f} (-3.0%)\n"
-        f"📈 *نسبة نجاح الصفقة:* {success_rate}\n\n"
-        f"📌 *توصية:* دخول مع إعادة الاختبار\n"
-        f"✨ *تم اكتشافه بواسطة خوارزمية M60 Hunter* ✨"
+        f"🔥 *M60 Hunter - انفجار مبكر* 🔥\n\n"
+        f"⏰ `{now}`\n"
+        f"🔴 `{symbol}` | 📊 `#{alert_num}`\n\n"
+        f"💰 `${price:.2f}` | 📈 `+{change:.2f}%`\n"
+        f"📊 `{rel_vol:.1f}x` | 🚀 `{vol_acc:.1f}x` | 💵 `${trade_value/1_000_000:.2f}M`\n\n"
+        f"🎯 `{target1:.2f}` | `{target2:.2f}` | `{target3:.2f}`\n"
+        f"🛑 `{stop:.2f}` | 📈 `{success_rate}`\n\n"
+        f"📌 {update_type} - دخول مع إعادة الاختبار"
     )
     await send_msg(msg)
 
 # ==================== الحلقة الرئيسية ====================
 async def main():
-    await send_msg("✅ *نظام الرصد الاحترافي يعمل الآن*")
+    await send_msg("✅ *M60 Hunter يعمل الآن*")
     print("--- البوت يعمل ---")
 
     async with aiohttp.ClientSession() as session:
@@ -175,25 +164,26 @@ async def main():
                 volumes = data["volumes"]
                 price_history = data["price_history"]
 
-                rel_vol = volume / 500000  # تقدير متوسط الحجم
+                rel_vol = volume / 500000
                 vol_acc = calculate_vol_acc(volumes)
                 momentum_acc = calculate_momentum_acc(price_history)
                 trade_value = price * volume
+                turnover = (volume / 1_000_000) * 100
 
                 if (change < MIN_CHANGE or rel_vol < MIN_REL_VOL or
                     vol_acc < MIN_VOL_ACC or trade_value < MIN_TRADE_VALUE or
-                    momentum_acc < MIN_MOMENTUM_ACC):
+                    turnover < MIN_TURNOVER or momentum_acc < MIN_MOMENTUM_ACC):
                     continue
 
                 if symbol not in last_values:
                     last_values[symbol] = {"price": price, "change": change}
                     alert_counters[symbol] = 1
-                    await send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, 1)
+                    await send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turnover, 1)
                 else:
                     if price >= last_values[symbol]["price"] * (1 + UPDATE_THRESHOLD):
                         last_values[symbol] = {"price": price, "change": change}
                         alert_counters[symbol] = alert_counters.get(symbol, 0) + 1
-                        await send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, alert_counters[symbol])
+                        await send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turnover, alert_counters[symbol])
 
                 await asyncio.sleep(random.uniform(0.3, 0.6))
 
