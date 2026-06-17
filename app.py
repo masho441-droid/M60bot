@@ -112,7 +112,7 @@ def calculate_momentum_acc(price_history):
     c2 = (price_history[-2] - price_history[-3]) / price_history[-3] * 100
     return c1 - c2
 
-# ==================== إرسال التنبيه (نموذج مختصر) ====================
+# ==================== إرسال التنبيه (النموذج المثالي) ====================
 async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turnover, alert_num):
     success_rate = calculate_success_rate(change, rel_vol, vol_acc, trade_value, turnover)
     target1 = price * 1.05
@@ -124,13 +124,13 @@ async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turno
     update_type = "تحديث زخم" if alert_num > 1 else "تنبيه أولي"
     
     msg = (
-        f"🔥 *M60 Hunter - انفجار مبكر* 🔥\n\n"
+        f"🔥 *M60 Hunter*\n\n"
         f"⏰ `{now}`\n"
         f"🔴 `{symbol}` | 📊 `#{alert_num}`\n\n"
-        f"💰 `${price:.2f}` | 📈 `+{change:.2f}%`\n"
-        f"📊 `{rel_vol:.1f}x` | 🚀 `{vol_acc:.1f}x` | 💵 `${trade_value/1_000_000:.2f}M`\n\n"
-        f"🎯 `{target1:.2f}` | `{target2:.2f}` | `{target3:.2f}`\n"
-        f"🛑 `{stop:.2f}` | 📈 `{success_rate}`\n\n"
+        f"💰 السعر: `{price:.2f}` | 📈 الصعود: `+{change:.2f}%`\n"
+        f"📊 الحجم: `{rel_vol:.1f}x` | 🚀 التسارع: `{vol_acc:.1f}x` | 💵 القيمة: `{trade_value/1_000_000:.2f}M`\n\n"
+        f"🎯 الأهداف: `{target1:.2f}` | `{target2:.2f}` | `{target3:.2f}`\n"
+        f"🛑 الوقف: `{stop:.2f}` | 📈 النجاح: `{success_rate}`\n\n"
         f"📌 {update_type} - دخول مع إعادة الاختبار"
     )
     await send_msg(msg)
