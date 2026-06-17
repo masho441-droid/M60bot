@@ -11,17 +11,17 @@ TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 bot = Bot(token=TOKEN)
 
-# ==================== المعايير الاحترافية (الصيد المبكر) ====================
+# ==================== المعايير المعدلة (الأسرع) ====================
 MIN_PRICE = 0.5
-MAX_PRICE = 8.0
-MIN_CHANGE = 1.5
-MIN_REL_VOL = 2.5
-MIN_VOL_ACC = 2.0
+MAX_PRICE = 5.0
+MIN_CHANGE = 3.0
+MIN_REL_VOL = 3.0
+MIN_VOL_ACC = 2.5
 MIN_TRADE_VALUE = 1_000_000
-MIN_TURNOVER = 5.0
+MIN_TURNOVER = 15.0
 MIN_VOLUME = 100_000
 MIN_MOMENTUM_ACC = 0.0
-UPDATE_THRESHOLD = 0.03
+UPDATE_THRESHOLD = 0.05  # 5% زيادة للتحديث
 
 last_values = {}
 alert_counters = {}
@@ -42,11 +42,11 @@ async def send_msg(text):
 
 def calculate_success_rate(change, rel_vol, vol_acc, trade_value, turnover):
     score = 0
-    score += min(change * 10, 30)
+    score += min(change * 10, 35)
     score += min(rel_vol * 8, 25)
     score += min(vol_acc * 7, 20)
-    score += 15 if trade_value > 1_000_000 else 10
-    score += 10 if turnover > 5 else 5
+    score += 10 if trade_value > 1_000_000 else 5
+    score += 10 if turnover > 15 else 5
     if score >= 85:
         return "85% - 95%"
     elif score >= 70:
@@ -113,19 +113,19 @@ def calculate_momentum_acc(price_history):
     c2 = (price_history[-2] - price_history[-3]) / price_history[-3] * 100
     return c1 - c2
 
-# ==================== إرسال التنبيه (نموذج 13-15 سطر) ====================
+# ==================== إرسال التنبيه ====================
 async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turnover, alert_num):
     success_rate = calculate_success_rate(change, rel_vol, vol_acc, trade_value, turnover)
-    target1 = price * 1.05
-    target2 = price * 1.08
-    target3 = price * 1.12
-    stop = price * 0.97
+    target1 = price * 1.5
+    target2 = price * 2.0
+    target3 = price * 2.5
+    stop = price * 0.90
     now = get_ny_time().strftime("%H:%M:%S")
     
-    update_type = "تحديث زخم - دخول مع إعادة الاختبار" if alert_num > 1 else "تنبيه أولي - مراقبة"
+    update_type = "تحديث زخم - دخول مع إعادة الاختبار" if alert_num > 1 else "تنبيه أولي - اختراق سيولة"
     
     msg = (
-        f"🔥 *M60 Hunter - صيد مبكر*\n\n"
+        f"🔥 *M60 Hunter - انفجار سيولة*\n\n"
         f"⏰ *الوقت:* `{now}`\n"
         f"🔴 *الرمز:* `{symbol}` | 📊 *رقم التنبيه:* `#{alert_num}`\n\n"
         f"💰 *السعر:* `{price:.2f}`     📈 *الصعود:* `+{change:.2f}%`\n"
@@ -141,7 +141,7 @@ async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turno
 
 # ==================== الحلقة الرئيسية ====================
 async def main():
-    await send_msg("✅ *M60 Hunter - صيد مبكر مع سيولة حقيقية*")
+    await send_msg("✅ *M60 Hunter - انفجار سيولة (معايير أسرع)*")
     print("--- البوت يعمل ---")
 
     async with aiohttp.ClientSession() as session:
