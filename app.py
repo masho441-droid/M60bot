@@ -56,7 +56,7 @@ def is_trading_time():
 
     return is_pre or is_regular or is_after
 
-# ==================== جلب البيانات مع دعم البري ماركت وحساب الحجم من الشموع ====================
+# ==================== جلب البيانات ====================
 async def fetch_all_tickers(session):
     url = "https://scanner.tradingview.com/america/scan"
     payload = {
@@ -74,7 +74,6 @@ async def fetch_all_tickers(session):
         return []
 
 async def fetch_stock_data(session, symbol):
-    # ===== إصلاح الرموز التي تحتوي على / =====
     if '/' in symbol:
         symbol = symbol.split('/')[0]
     
@@ -83,8 +82,12 @@ async def fetch_stock_data(session, symbol):
         headers = {'User-Agent': 'Mozilla/5.0'}
         async with session.get(url, headers=headers, timeout=5) as resp:
             data = await resp.json()
-            res = data['chart']['result'][0]['meta']
             
+            if not data.get('chart', {}).get('result'):
+                print(f"⚠️ لا توجد بيانات لـ {symbol}")
+                return None
+            
+            res = data['chart']['result'][0]['meta']
             price = res.get('preMarketPrice') or res.get('regularMarketPrice')
             
             quote = data['chart']['result'][0]['indicators']['quote'][0]
@@ -97,16 +100,12 @@ async def fetch_stock_data(session, symbol):
             prev_close = res.get('regularMarketPreviousClose', res.get('previousClose', price))
             change = ((price - prev_close) / prev_close) * 100
             
-            price_history = [c for c in quote.get('close', []) if c]
-            
             return {
                 "symbol": symbol,
                 "price": price,
                 "volume": vol,
                 "change": change,
-                "volumes": volumes,
-                "price_history": price_history,
-                "prev_close": prev_close
+                "volumes": volumes
             }
     except Exception as e:
         print(f"خطأ في {symbol}: {e}")
@@ -147,7 +146,7 @@ async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turno
     )
     await send_msg(msg)
 
-# ==================== الحلقة الرئيسية ====================
+# ==================== الحلقة الرئيسية مع التتبع ====================
 async def main():
     await send_msg("✅ *M60 Hunter - صيد مبكر متقدم*")
     print("--- البوت يعمل ---")
@@ -165,6 +164,8 @@ async def main():
 
             tasks = [fetch_stock_data(session, t) for t in tickers[:100]]
             results = await asyncio.gather(*tasks)
+
+            print(f"🔍 بدء تحليل {len(results)} سهماً")
 
             for data in results:
                 if not data:
@@ -187,6 +188,9 @@ async def main():
                     turnover < MIN_TURNOVER or mbi < MIN_MBI):
                     continue
 
+                # إذا وصل إلى هنا، فهذا يعني أن السهم يحقق المعايير
+                print(f"✅ سيتم إرسال تنبيه لـ {symbol}")
+
                 if symbol not in last_values:
                     last_values[symbol] = {"price": price, "change": change}
                     alert_counters[symbol] = 1
@@ -199,6 +203,7 @@ async def main():
 
                 await asyncio.sleep(random.uniform(0.3, 0.6))
 
+            print(f"✅ انتهى الفحص. انتظار 30 ثانية...")
             await asyncio.sleep(30)
 
 if __name__ == "__main__":
