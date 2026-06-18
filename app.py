@@ -19,12 +19,12 @@ MAX_PRICE = 5.0
 MIN_VOLUME_RATIO = 1.5          # الشمعة الحالية > متوسط آخر 19 × 1.5
 MIN_LIQUIDITY_ACC = 1.5         # تسارع السيولة (آخر 3 / أول 2 من آخر 5)
 RSI_MIN = 45
-MIN_TRADE_VALUE = 100_000       # 100K دولار حد أدنى للسيولة (تم التخفيض)
+MIN_TRADE_VALUE = 100_000       # 100K دولار حد أدنى للسيولة
 
-# شروط Pre-Market و After-Hours (مخففة لكن دقيقة)
+# شروط Pre-Market و After-Hours (تعتمد على البيانات الفورية)
 PRE_AFTER_MIN_CHANGE = 1.0              # ارتفاع 1% على الأقل
-PRE_AFTER_MIN_VOLUME_RATIO = 2.0        # حجم أعلى (2x) لتعويض عدم وجود RSI و VWAP
-PRE_AFTER_MIN_TRADE_VALUE = 100_000     # 100K دولار (تم التخفيض)
+PRE_AFTER_MIN_VOLUME_RATIO = 2.0        # حجم نسبي 2x
+PRE_AFTER_MIN_TRADE_VALUE = 100_000     # 100K دولار
 
 last_values = {}
 alert_counters = {}
@@ -90,8 +90,14 @@ async def fetch_stock_data(session, symbol):
             lows = [l for l in ohlcv.get('low', []) if l]
             volumes = [v for v in ohlcv.get('volume', []) if v]
             
-            # السعر الحالي (يعتمد على الجلسة)
+            # ============================================================
+            # 1. تحديد الجلسة
+            # ============================================================
             session_type = get_session()
+            
+            # ============================================================
+            # 2. جلب السعر (حسب الجلسة)
+            # ============================================================
             if session_type == "pre_market":
                 price = res.get('preMarketPrice') or res.get('regularMarketPrice')
             else:
@@ -100,30 +106,45 @@ async def fetch_stock_data(session, symbol):
             if not price:
                 return None
             
-            # الحجم والتغير
+            # ============================================================
+            # 3. جلب الحجم (حسب الجلسة)
+            # ============================================================
+            if session_type == "pre_market":
+                volume = res.get('preMarketVolume', 0)
+            elif session_type == "after_hours":
+                # في After-Hours، نستخدم الحجم من الشموع إن وجد، وإلا من meta
+                volume = res.get('regularMarketVolume', 0)
+                if volume == 0 and volumes:
+                    volume = sum(volumes[-5:]) if len(volumes) >= 5 else 0
+            else:  # regular
+                volume = res.get('regularMarketVolume', 0)
+                if volume == 0 and volumes:
+                    volume = sum(volumes[-5:]) if len(volumes) >= 5 else 0
+            
+            # إذا كان الحجم صفراً → لا يمكن التداول → تجاهل
+            if volume == 0:
+                return None
+            
+            # ============================================================
+            # 4. حساب التغير
+            # ============================================================
             prev_close = res.get('regularMarketPreviousClose', price)
             change = ((price - prev_close) / prev_close) * 100
             
-            # حجم التداول (يعتمد على الجلسة)
-            if session_type == "pre_market":
-                volume = res.get('preMarketVolume', 0)
-            else:
-                volume = res.get('regularMarketVolume', 0)
+            # ============================================================
+            # 5. حساب المؤشرات (حسب الجلسة)
+            # ============================================================
+            shares_outstanding = res.get('sharesOutstanding', 0)
+            trade_value = price * volume
             
-            if not volume and volumes:
-                volume = sum(volumes[-5:]) if len(volumes) >= 5 else 0
-            
-            # القيم الافتراضية للمؤشرات (في حال عدم توفر شموع)
+            # قيم افتراضية للمؤشرات (تستخدم في Pre/After)
             volume_ratio = 1.0
             liquidity_acc = 1.0
             vwap = 0
             rsi = 50
-            shares_outstanding = res.get('sharesOutstanding', 0)
-            trade_value = price * volume if volume else 0
             
-            # ========== المؤشرات الكاملة (للجلسة العادية) ==========
             if session_type == "regular" and closes and volumes:
-                # 1. حجم الشمعة / متوسط 19
+                # ----- المؤشرات الكاملة للجلسة العادية -----
                 current_volume = volumes[-1] if volumes else 0
                 if len(volumes) >= 20:
                     avg_19_volume = sum(volumes[-20:-1]) / 19
@@ -131,19 +152,16 @@ async def fetch_stock_data(session, symbol):
                     avg_19_volume = current_volume
                 volume_ratio = current_volume / avg_19_volume if avg_19_volume > 0 else 1.0
                 
-                # 2. تسارع السيولة
                 if len(volumes) >= 5:
                     recent_avg = sum(volumes[-3:]) / 3
                     old_avg = sum(volumes[-5:-3]) / 2
                     liquidity_acc = recent_avg / old_avg if old_avg > 0 else 1.0
                 
-                # 3. VWAP
                 if len(closes) >= 2:
                     typical_prices = [(h + l + c) / 3 for h, l, c in zip(highs, lows, closes)]
                     if sum(volumes) > 0:
                         vwap = sum(tp * v for tp, v in zip(typical_prices, volumes)) / sum(volumes)
                 
-                # 4. RSI
                 if len(closes) >= 15:
                     gains, losses = [], []
                     for i in range(1, 15):
@@ -160,14 +178,12 @@ async def fetch_stock_data(session, symbol):
                         rs = avg_gain / avg_loss
                         rsi = 100 - (100 / (1 + rs))
             
-            # ========== بيانات Pre-Market و After-Hours ==========
-            elif session_type in ["pre_market", "after_hours"]:
-                # نعتمد على البيانات المتاحة فقط (السعر، الحجم، التغير)
-                # ونضبط المؤشرات بشكل افتراضي لتنجح الشروط المبسطة
-                volume_ratio = 2.5  # قيمة عالية لتعويض عدم وجود شموع
+            else:
+                # ----- Pre-Market و After-Hours: نستخدم قيماً افتراضية عالية -----
+                volume_ratio = 2.5
                 liquidity_acc = 2.0
-                vwap = price * 0.95  # نفترض أن السعر أعلى من VWAP
-                rsi = 55  # قيمة إيجابية افتراضية
+                vwap = price * 0.95
+                rsi = 55
             
             return {
                 "symbol": symbol,
@@ -194,7 +210,7 @@ async def send_alert(symbol, price, change, trade_value, volume_ratio, liquidity
     resistance2 = price * 1.20
     support = price * 0.965
     
-    # تحديد التوصية حسب الجلسة وقوة الإشارات
+    # تحديد التوصية حسب الجلسة
     if session_type == "regular":
         all_signals = all([volume_ratio >= 1.5, liquidity_acc >= 1.5, price > vwap, rsi >= 45])
         if all_signals:
@@ -203,7 +219,7 @@ async def send_alert(symbol, price, change, trade_value, volume_ratio, liquidity
             recommendation = "⏳ انتظار اختراق"
         else:
             recommendation = "📊 مراقبة"
-    else:  # pre_market أو after_hours
+    else:
         if change >= 2.0 and trade_value >= 100_000:
             recommendation = "🔥 إشارة قوية (Pre/After)"
         elif change >= 1.0 and trade_value >= 100_000:
@@ -217,7 +233,6 @@ async def send_alert(symbol, price, change, trade_value, volume_ratio, liquidity
     else:
         shares_display = f"{shares_outstanding:,}"
     
-    # تحديد نوع الجلسة
     session_label = "Pre-Market" if session_type == "pre_market" else "After-Hours" if session_type == "after_hours" else "Regular"
     
     msg = (
@@ -246,7 +261,7 @@ async def send_alert(symbol, price, change, trade_value, volume_ratio, liquidity
 # ==================== الحلقة الرئيسية ====================
 async def main():
     await send_msg("✅ *بوت المؤشرات الفورية - يدعم Pre-Market و After-Hours*")
-    print("--- البوت يعمل بتحسين Pre-Market و After-Hours (سيولة 100K) ---")
+    print("--- البوت يعمل بتحسين Pre-Market و After-Hours (بيانات فورية) ---")
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -295,15 +310,14 @@ async def main():
                     if trade_value < MIN_TRADE_VALUE:
                         continue
 
-                # ====== شروط Pre-Market و After-Hours (مخففة لكن دقيقة) ======
-                else:  # pre_market أو after_hours
+                # ====== شروط Pre-Market و After-Hours ======
+                else:
                     if change < PRE_AFTER_MIN_CHANGE:
                         continue
                     if volume_ratio < PRE_AFTER_MIN_VOLUME_RATIO:
                         continue
                     if trade_value < PRE_AFTER_MIN_TRADE_VALUE:
                         continue
-                    # لا نتحقق من RSI أو VWAP في هذه الجلسات
 
                 # منطق التنبيه
                 if symbol not in last_values:
