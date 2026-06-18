@@ -3,7 +3,7 @@ import asyncio
 import aiohttp
 import time
 import random
-from datetime import datetime
+from datetime import datetime, time as dt_time
 import pytz
 from telegram import Bot
 
@@ -37,6 +37,26 @@ async def send_msg(text):
 
 def calculate_mbi(change, rel_vol):
     return (change / 1.5) * (rel_vol / 2.0)
+
+# ==================== التحقق من أوقات العمل ====================
+def is_trading_time():
+    now = get_ny_time()
+    current_time = now.time()
+    
+    # جلسات العمل
+    pre_market_start = dt_time(4, 0)    # 4:00 ص
+    pre_market_end = dt_time(9, 30)     # 9:30 ص
+    regular_start = dt_time(9, 30)      # 9:30 ص
+    regular_end = dt_time(16, 0)        # 4:00 م
+    after_hours_start = dt_time(16, 0)  # 4:00 م
+    after_hours_end = dt_time(20, 0)    # 8:00 م
+
+    # نتحقق من أن الوقت داخل أي من الجلسات الثلاث
+    is_pre = pre_market_start <= current_time < pre_market_end
+    is_regular = regular_start <= current_time < regular_end
+    is_after = after_hours_start <= current_time < after_hours_end
+
+    return is_pre or is_regular or is_after
 
 # ==================== جلب البيانات ====================
 async def fetch_all_tickers(session):
@@ -92,7 +112,7 @@ def calculate_vol_acc(volumes):
 def calculate_turnover(volume):
     return (volume / 1_000_000) * 100
 
-# ==================== إرسال التنبيه (النموذج المثالي) ====================
+# ==================== إرسال التنبيه ====================
 async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turnover, mbi, alert_num):
     now = get_ny_time().strftime("%H:%M:%S")
     target1 = price * 1.5
@@ -120,10 +140,17 @@ async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turno
 # ==================== الحلقة الرئيسية ====================
 async def main():
     await send_msg("✅ *M60 Hunter - صيد مبكر متقدم*")
-    print("--- البوت يعمل 24/7 ---")
+    print("--- البوت يعمل ---")
 
     async with aiohttp.ClientSession() as session:
         while True:
+            # التحقق من وقت العمل
+            if not is_trading_time():
+                now = get_ny_time().strftime("%H:%M:%S")
+                print(f"⏸️ خارج أوقات التداول ({now}). انتظار 5 دقائق...")
+                await asyncio.sleep(300)
+                continue
+
             tickers = await fetch_all_tickers(session)
             print(f"📡 تم جلب {len(tickers)} سهماً")
 
