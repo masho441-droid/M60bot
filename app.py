@@ -11,7 +11,7 @@ TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 bot = Bot(token=TOKEN)
 
-# ==================== معايير الاستراتيجية (مثل النموذج تماماً) ====================
+# ==================== معايير الاستراتيجية ====================
 MIN_PRICE = 0.5
 MAX_PRICE = 5.0
 MIN_CHANGE = 0.3  # نسبة الارتفاع 0.3%
@@ -19,10 +19,15 @@ MIN_REL_VOL = 0.3  # الحجم النسبي 0.3X
 MIN_TRADE_VALUE = 100_000  # سيولة 100K$
 UPDATE_THRESHOLD = 0.02  # تحديث عند تحرك 2%
 
-# نسب الأهداف الفنية (ديناميكية بناءً على السعر الحالي)
+# نسب الأهداف الفنية (ديناميكية)
 RESISTANCE_1_RATIO = 1.07  # مقاومة 1 = سعر + 7%
 RESISTANCE_2_RATIO = 1.20  # مقاومة 2 = سعر + 20%
 SUPPORT_RATIO = 0.965  # الدعم = سعر - 3.5%
+
+# ==================== مؤشر قوة الاندفاع ====================
+VSR_STRONG = 2.5  # اندفاع قوي جداً (دخول فوري)
+VSR_GOOD = 2.0    # اندفاع جيد (دخول مع وقف ضيق)
+VSR_MEDIUM = 1.5  # اندفاع متوسط (انتظار اختراق)
 
 last_values = {}
 alert_counters = {}
@@ -108,9 +113,6 @@ async def fetch_stock_data(session, symbol):
             # القيمة السوقية
             market_cap = res.get('marketCap', 0)
             
-            # عدد الأسهم المتاحة (تقريبي)
-            shares_outstanding = res.get('sharesOutstanding', 0)
-            
             return {
                 "symbol": symbol,
                 "price": price,
@@ -119,15 +121,44 @@ async def fetch_stock_data(session, symbol):
                 "volumes": volumes,
                 "prev_close": prev_close,
                 "first_minute_vol": first_minute_vol,
-                "market_cap": market_cap,
-                "shares_outstanding": shares_outstanding
+                "market_cap": market_cap
             }
     except Exception as e:
         print(f"خطأ في {symbol}: {e}")
         return None
 
-# ==================== إرسال التنبيه (مطابق للنموذج تماماً) ====================
-async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, market_cap, first_minute_vol, alert_num):
+def calculate_vol_acc(volumes):
+    """تسارع الحجم (آخر شمعة مقارنة بمتوسط 5 شموع سابقة)"""
+    if len(volumes) < 6:
+        return 1.0
+    last = volumes[-1]
+    avg_5 = sum(volumes[-6:-1]) / 5
+    return last / avg_5 if avg_5 > 0 else 1.0
+
+def calculate_vsr(volumes):
+    """
+    قوة الاندفاع (Volume Surge Ratio)
+    = حجم أول دقيقة ÷ متوسط حجم آخر 5 دقائق
+    """
+    if len(volumes) < 6:
+        return 1.0
+    first_minute = volumes[0] if volumes else 0
+    avg_5 = sum(volumes[-5:]) / 5 if volumes else 1
+    return first_minute / avg_5 if avg_5 > 0 else 1.0
+
+def get_vsr_status(vsr):
+    """تحديد حالة قوة الاندفاع"""
+    if vsr >= VSR_STRONG:
+        return "🔥 اندفاع قوي جداً (دخول فوري)"
+    elif vsr >= VSR_GOOD:
+        return "✅ اندفاع جيد (دخول مع وقف ضيق)"
+    elif vsr >= VSR_MEDIUM:
+        return "⏳ اندفاع متوسط (انتظار اختراق)"
+    else:
+        return "📉 اندفاع ضعيف (مراقبة فقط)"
+
+# ==================== إرسال التنبيه ====================
+async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, market_cap, first_minute_vol, alert_num, vsr):
     now = get_ny_time().strftime("%H:%M:%S")
     
     # حساب الأهداف الفنية (ديناميكية)
@@ -140,6 +171,9 @@ async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, marke
     
     # حجم السيولة بالألف
     liquidity = trade_value / 1000
+    
+    # حالة قوة الاندفاع
+    vsr_status = get_vsr_status(vsr)
     
     # تحديد نوع التنبيه
     if alert_num == 1:
@@ -159,7 +193,7 @@ async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, marke
         f"🔹 *الحجم النسبي:* `{rel_vol:.1f}X`\n"
         f"🔹 *حجم أول دقيقة:* `{first_minute_vol:,}`\n"
         f"🔹 *حجم السيولة:* `{liquidity:.1f}K$`\n"
-        f"🔹 *السهم إيجابي* ✅\n\n"
+        f"🔹 *قوة الاندفاع:* `{vsr:.1f}x` {vsr_status}\n\n"
         f"🎯 *الأهداف الفنية:*\n"
         f"  • مقاومة 1: `{resistance1:.3f} دولار`\n"
         f"  • مقاومة 2: `{resistance2:.3f} دولار`\n"
@@ -170,8 +204,8 @@ async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, marke
 
 # ==================== الحلقة الرئيسية ====================
 async def main():
-    await send_msg("✅ *بوت زخم 5 دقائق - جاهز*")
-    print("--- البوت يعمل بالاستراتيجية الجديدة ---")
+    await send_msg("✅ *بوت زخم 5 دقائق - قوة الاندفاع*")
+    print("--- البوت يعمل بالاستراتيجية المطورة ---")
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -205,8 +239,9 @@ async def main():
                 rel_vol = volume / 500000  # حجم نسبي مقارنة بـ 500K
                 vol_acc = calculate_vol_acc(volumes)
                 trade_value = price * volume
+                vsr = calculate_vsr(volumes)  # قوة الاندفاع
 
-                # ✅ شروط الاستراتيجية (مثل النموذج)
+                # ✅ شروط الاستراتيجية
                 if change < MIN_CHANGE:
                     continue
                 if rel_vol < MIN_REL_VOL:
@@ -220,26 +255,18 @@ async def main():
                 if symbol not in last_values:
                     last_values[symbol] = {"price": price, "change": change}
                     alert_counters[symbol] = 1
-                    await send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, market_cap, first_minute_vol, 1)
+                    await send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, market_cap, first_minute_vol, 1, vsr)
                 else:
                     # تحديث عند تحرك 2%
                     if price >= last_values[symbol]["price"] * (1 + UPDATE_THRESHOLD):
                         last_values[symbol] = {"price": price, "change": change}
                         alert_counters[symbol] = alert_counters.get(symbol, 0) + 1
-                        await send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, market_cap, first_minute_vol, alert_counters[symbol])
+                        await send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, market_cap, first_minute_vol, alert_counters[symbol], vsr)
 
                 await asyncio.sleep(random.uniform(0.3, 0.6))
 
             print(f"✅ انتهى الفحص. انتظار 30 ثانية...")
             await asyncio.sleep(30)
-
-def calculate_vol_acc(volumes):
-    """تسارع الحجم (آخر شمعة مقارنة بمتوسط 5 شموع سابقة)"""
-    if len(volumes) < 6:
-        return 1.0
-    last = volumes[-1]
-    avg_5 = sum(volumes[-6:-1]) / 5
-    return last / avg_5 if avg_5 > 0 else 1.0
 
 if __name__ == "__main__":
     asyncio.run(main())
