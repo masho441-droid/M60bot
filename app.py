@@ -11,11 +11,11 @@ TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 bot = Bot(token=TOKEN)
 
-# ==================== معايير الاستراتيجية ====================
+# ==================== معايير الاستراتيجية (بعد زيادة الصرامة) ====================
 MIN_PRICE = 0.5
 MAX_PRICE = 5.0
-MIN_CHANGE = 0.3  # نسبة الارتفاع 0.3%
-MIN_REL_VOL = 0.3  # الحجم النسبي 0.3X
+MIN_CHANGE = 0.5  # تم الرفع من 0.3% إلى 0.5%
+MIN_REL_VOL = 0.4  # تم الرفع من 0.3X إلى 0.4X
 MIN_TRADE_VALUE = 100_000  # سيولة 100K$
 UPDATE_THRESHOLD = 0.02  # تحديث عند تحرك 2%
 
@@ -24,10 +24,10 @@ RESISTANCE_1_RATIO = 1.07  # مقاومة 1 = سعر + 7%
 RESISTANCE_2_RATIO = 1.20  # مقاومة 2 = سعر + 20%
 SUPPORT_RATIO = 0.965  # الدعم = سعر - 3.5%
 
-# ==================== مؤشر قوة الاندفاع ====================
-VSR_STRONG = 2.5  # اندفاع قوي جداً (دخول فوري)
-VSR_GOOD = 2.0    # اندفاع جيد (دخول مع وقف ضيق)
-VSR_MEDIUM = 1.5  # اندفاع متوسط (انتظار اختراق)
+# ==================== مؤشر قوة الاندفاع (مع زيادة الصرامة) ====================
+MIN_VSR_FOR_ALERT = 1.5  # ✅ شرط أساسي: لا تنبيه بدون VSR ≥ 1.5
+VSR_STRONG = 2.0  # اندفاع قوي (دخول فوري)
+VSR_GOOD = 1.5  # اندفاع جيد (انتظار اختراق)
 
 last_values = {}
 alert_counters = {}
@@ -127,14 +127,6 @@ async def fetch_stock_data(session, symbol):
         print(f"خطأ في {symbol}: {e}")
         return None
 
-def calculate_vol_acc(volumes):
-    """تسارع الحجم (آخر شمعة مقارنة بمتوسط 5 شموع سابقة)"""
-    if len(volumes) < 6:
-        return 1.0
-    last = volumes[-1]
-    avg_5 = sum(volumes[-6:-1]) / 5
-    return last / avg_5 if avg_5 > 0 else 1.0
-
 def calculate_vsr(volumes):
     """
     قوة الاندفاع (Volume Surge Ratio)
@@ -149,16 +141,14 @@ def calculate_vsr(volumes):
 def get_vsr_status(vsr):
     """تحديد حالة قوة الاندفاع"""
     if vsr >= VSR_STRONG:
-        return "🔥 اندفاع قوي جداً (دخول فوري)"
+        return "🔥 اندفاع قوي (دخول فوري)"
     elif vsr >= VSR_GOOD:
-        return "✅ اندفاع جيد (دخول مع وقف ضيق)"
-    elif vsr >= VSR_MEDIUM:
-        return "⏳ اندفاع متوسط (انتظار اختراق)"
+        return "✅ اندفاع جيد (انتظار اختراق)"
     else:
-        return "📉 اندفاع ضعيف (مراقبة فقط)"
+        return "📉 اندفاع ضعيف (مراقبة)"
 
 # ==================== إرسال التنبيه ====================
-async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, market_cap, first_minute_vol, alert_num, vsr):
+async def send_alert(symbol, price, change, rel_vol, trade_value, market_cap, first_minute_vol, alert_num, vsr):
     now = get_ny_time().strftime("%H:%M:%S")
     
     # حساب الأهداف الفنية (ديناميكية)
@@ -198,14 +188,15 @@ async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, marke
         f"  • مقاومة 1: `{resistance1:.3f} دولار`\n"
         f"  • مقاومة 2: `{resistance2:.3f} دولار`\n"
         f"  • الدعم: `{support:.3f} دولار`\n\n"
+        f"📌 *توصية:* {vsr_status}\n"
         f"⏰ *التوقيت الأمريكي:* `{now}`"
     )
     await send_msg(msg)
 
 # ==================== الحلقة الرئيسية ====================
 async def main():
-    await send_msg("✅ *بوت زخم 5 دقائق - قوة الاندفاع*")
-    print("--- البوت يعمل بالاستراتيجية المطورة ---")
+    await send_msg("✅ *بوت زخم 5 دقائق - استراتيجية محسنة*")
+    print("--- البوت يعمل بالاستراتيجية المطورة (صرامة أعلى) ---")
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -236,12 +227,11 @@ async def main():
                 market_cap = data["market_cap"]
 
                 # حساب المؤشرات
-                rel_vol = volume / 500000  # حجم نسبي مقارنة بـ 500K
-                vol_acc = calculate_vol_acc(volumes)
+                rel_vol = volume / 500000
                 trade_value = price * volume
                 vsr = calculate_vsr(volumes)  # قوة الاندفاع
 
-                # ✅ شروط الاستراتيجية
+                # ✅ شروط الاستراتيجية (بعد زيادة الصرامة)
                 if change < MIN_CHANGE:
                     continue
                 if rel_vol < MIN_REL_VOL:
@@ -250,18 +240,22 @@ async def main():
                     continue
                 if price < MIN_PRICE or price > MAX_PRICE:
                     continue
+                
+                # ✅ الشرط الجديد: لا تنبيه بدون قوة اندفاع كافية
+                if vsr < MIN_VSR_FOR_ALERT:
+                    continue
 
                 # منطق التنبيه
                 if symbol not in last_values:
                     last_values[symbol] = {"price": price, "change": change}
                     alert_counters[symbol] = 1
-                    await send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, market_cap, first_minute_vol, 1, vsr)
+                    await send_alert(symbol, price, change, rel_vol, trade_value, market_cap, first_minute_vol, 1, vsr)
                 else:
                     # تحديث عند تحرك 2%
                     if price >= last_values[symbol]["price"] * (1 + UPDATE_THRESHOLD):
                         last_values[symbol] = {"price": price, "change": change}
                         alert_counters[symbol] = alert_counters.get(symbol, 0) + 1
-                        await send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, market_cap, first_minute_vol, alert_counters[symbol], vsr)
+                        await send_alert(symbol, price, change, rel_vol, trade_value, market_cap, first_minute_vol, alert_counters[symbol], vsr)
 
                 await asyncio.sleep(random.uniform(0.3, 0.6))
 
