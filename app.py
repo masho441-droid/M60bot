@@ -81,10 +81,8 @@ async def fetch_stock_data(session, symbol):
             data = await resp.json()
             res = data['chart']['result'][0]['meta']
             
-            # محاولة جلب بيانات البري ماركت أولاً
             price = res.get('preMarketPrice') or res.get('regularMarketPrice')
             
-            # حساب الحجم من الشموع اللحظية (آخر 5 شموع)
             quote = data['chart']['result'][0]['indicators']['quote'][0]
             volumes = [v for v in quote.get('volume', []) if v]
             vol = sum(volumes[-5:]) if volumes else res.get('preMarketVolume') or res.get('regularMarketVolume', 0)
