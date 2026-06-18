@@ -11,16 +11,18 @@ TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 bot = Bot(token=TOKEN)
 
-# ==================== المعايير ====================
+# ==================== معايير الاستراتيجية (مثل النموذج تماماً) ====================
 MIN_PRICE = 0.5
 MAX_PRICE = 5.0
-MIN_CHANGE = 1.0
-MIN_REL_VOL = 1.5
-MIN_VOL_ACC = 1.2
-MIN_TRADE_VALUE = 200000
-MIN_VOL_MOMENTUM = 0.3   # 30% زيادة عن المتوسط
-MIN_MBI = 0.8
-UPDATE_THRESHOLD = 0.05
+MIN_CHANGE = 0.3  # نسبة الارتفاع 0.3%
+MIN_REL_VOL = 0.3  # الحجم النسبي 0.3X
+MIN_TRADE_VALUE = 100_000  # سيولة 100K$
+UPDATE_THRESHOLD = 0.02  # تحديث عند تحرك 2%
+
+# نسب الأهداف الفنية (ديناميكية بناءً على السعر الحالي)
+RESISTANCE_1_RATIO = 1.07  # مقاومة 1 = سعر + 7%
+RESISTANCE_2_RATIO = 1.20  # مقاومة 2 = سعر + 20%
+SUPPORT_RATIO = 0.965  # الدعم = سعر - 3.5%
 
 last_values = {}
 alert_counters = {}
@@ -34,9 +36,6 @@ async def send_msg(text):
         await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="Markdown")
     except Exception as e:
         print(f"خطأ: {e}")
-
-def calculate_mbi(change, rel_vol):
-    return (change / 1.5) * (rel_vol / 2.0)
 
 # ==================== التحقق من أوقات العمل ====================
 def is_trading_time():
@@ -84,14 +83,17 @@ async def fetch_stock_data(session, symbol):
             data = await resp.json()
             
             if not data.get('chart', {}).get('result'):
-                print(f"⚠️ لا توجد بيانات لـ {symbol}")
                 return None
             
             res = data['chart']['result'][0]['meta']
+            
+            # السعر الحالي
             price = res.get('preMarketPrice') or res.get('regularMarketPrice')
             
             quote = data['chart']['result'][0]['indicators']['quote'][0]
             volumes = [v for v in quote.get('volume', []) if v]
+            
+            # الحجم الإجمالي (آخر 5 شموع)
             vol = sum(volumes[-5:]) if volumes else res.get('preMarketVolume') or res.get('regularMarketVolume', 0)
             
             if not price or not vol:
@@ -100,9 +102,14 @@ async def fetch_stock_data(session, symbol):
             prev_close = res.get('regularMarketPreviousClose', res.get('previousClose', price))
             change = ((price - prev_close) / prev_close) * 100
             
-            # ===== حساب Volume Momentum (بديل الدوران) =====
-            avg_5 = sum(volumes[-6:-1]) / 5 if len(volumes) >= 6 else vol
-            vol_momentum = (vol - avg_5) / avg_5 if avg_5 > 0 else 0
+            # حجم أول دقيقة
+            first_minute_vol = volumes[0] if volumes and len(volumes) > 0 else 0
+            
+            # القيمة السوقية
+            market_cap = res.get('marketCap', 0)
+            
+            # عدد الأسهم المتاحة (تقريبي)
+            shares_outstanding = res.get('sharesOutstanding', 0)
             
             return {
                 "symbol": symbol,
@@ -110,48 +117,61 @@ async def fetch_stock_data(session, symbol):
                 "volume": vol,
                 "change": change,
                 "volumes": volumes,
-                "vol_momentum": vol_momentum
+                "prev_close": prev_close,
+                "first_minute_vol": first_minute_vol,
+                "market_cap": market_cap,
+                "shares_outstanding": shares_outstanding
             }
     except Exception as e:
         print(f"خطأ في {symbol}: {e}")
         return None
 
-def calculate_vol_acc(volumes):
-    if len(volumes) < 6:
-        return 1.0
-    last = volumes[-1]
-    avg_5 = sum(volumes[-6:-1]) / 5
-    return last / avg_5 if avg_5 > 0 else 1.0
-
-# ==================== إرسال التنبيه ====================
-async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, vol_momentum, mbi, alert_num):
+# ==================== إرسال التنبيه (مطابق للنموذج تماماً) ====================
+async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, market_cap, first_minute_vol, alert_num):
     now = get_ny_time().strftime("%H:%M:%S")
-    target1 = price * 1.5
-    target2 = price * 2.0
-    target3 = price * 2.5
-    stop = price * 0.90
-    success = "82% - 92%"
-    update_type = "تحديث زخم" if alert_num > 1 else "تنبيه أولي"
+    
+    # حساب الأهداف الفنية (ديناميكية)
+    resistance1 = price * RESISTANCE_1_RATIO
+    resistance2 = price * RESISTANCE_2_RATIO
+    support = price * SUPPORT_RATIO
+    
+    # عدد الأسهم المتاحة
+    shares_available = int(trade_value / price) if price > 0 else 0
+    
+    # حجم السيولة بالألف
+    liquidity = trade_value / 1000
+    
+    # تحديد نوع التنبيه
+    if alert_num == 1:
+        alert_type = "زخم شرائي 5 دقائق"
+    else:
+        alert_type = f"تحديث زخم #{alert_num}"
     
     msg = (
-        f"🔥 *M60 Hunter*\n\n"
-        f"⏰ *الوقت:* `{now}`\n"
-        f"🔴 *الرمز:* `{symbol}` | 📊 *رقم التنبيه:* `#{alert_num}`\n\n"
-        f"💰 *السعر:* `{price:.2f}`     📈 *الصعود:* `+{change:.2f}%`\n"
-        f"📊 *الحجم:* `{rel_vol:.1f}x`     🚀 *التسارع:* `{vol_acc:.1f}x`\n"
-        f"💵 *القيمة:* `{trade_value/1_000_000:.2f}M`\n"
-        f"📊 *زخم الحجم:* `{vol_momentum:.0%}`\n\n"
-        f"🎯 *الأهداف:* `{target1:.2f}` | `{target2:.2f}` | `{target3:.2f}`\n"
-        f"🛑 *وقف الخسارة:* `{stop:.2f}`\n"
-        f"📈 *نسبة النجاح:* `{success}`\n\n"
-        f"📌 *توصية:* {update_type}"
+        f"📊 *{symbol}* — {now}\n\n"
+        f"🔹 *الرمز:* `{symbol}`\n"
+        f"🔹 *نوع الحركة:* {alert_type}\n"
+        f"🔹 *عدد مرات التنبيه اليوم:* {alert_num} مرة\n"
+        f"🔹 *نسبة الارتفاع:* `+{change:.1f}%`\n"
+        f"🔹 *السعر الحالي:* `{price:.3f} دولار`\n"
+        f"🔹 *عدد الأسهم المتاحة للتداول:* `{shares_available:,}`\n"
+        f"🔹 *القيمة السوقية:* `{market_cap/1_000_000:.1f}M`\n"
+        f"🔹 *الحجم النسبي:* `{rel_vol:.1f}X`\n"
+        f"🔹 *حجم أول دقيقة:* `{first_minute_vol:,}`\n"
+        f"🔹 *حجم السيولة:* `{liquidity:.1f}K$`\n"
+        f"🔹 *السهم إيجابي* ✅\n\n"
+        f"🎯 *الأهداف الفنية:*\n"
+        f"  • مقاومة 1: `{resistance1:.3f} دولار`\n"
+        f"  • مقاومة 2: `{resistance2:.3f} دولار`\n"
+        f"  • الدعم: `{support:.3f} دولار`\n\n"
+        f"⏰ *التوقيت الأمريكي:* `{now}`"
     )
     await send_msg(msg)
 
 # ==================== الحلقة الرئيسية ====================
 async def main():
-    await send_msg("✅ *M60 Hunter يعمل (مع Volume Momentum)*")
-    print("--- البوت يعمل ---")
+    await send_msg("✅ *بوت زخم 5 دقائق - جاهز*")
+    print("--- البوت يعمل بالاستراتيجية الجديدة ---")
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -178,34 +198,48 @@ async def main():
                 volume = data["volume"]
                 change = data["change"]
                 volumes = data["volumes"]
-                vol_momentum = data["vol_momentum"]
+                first_minute_vol = data["first_minute_vol"]
+                market_cap = data["market_cap"]
 
-                rel_vol = volume / 500000
+                # حساب المؤشرات
+                rel_vol = volume / 500000  # حجم نسبي مقارنة بـ 500K
                 vol_acc = calculate_vol_acc(volumes)
                 trade_value = price * volume
-                mbi = calculate_mbi(change, rel_vol)
 
-                if (change < MIN_CHANGE or rel_vol < MIN_REL_VOL or
-                    vol_acc < MIN_VOL_ACC or trade_value < MIN_TRADE_VALUE or
-                    vol_momentum < MIN_VOL_MOMENTUM or mbi < MIN_MBI):
+                # ✅ شروط الاستراتيجية (مثل النموذج)
+                if change < MIN_CHANGE:
+                    continue
+                if rel_vol < MIN_REL_VOL:
+                    continue
+                if trade_value < MIN_TRADE_VALUE:
+                    continue
+                if price < MIN_PRICE or price > MAX_PRICE:
                     continue
 
-                print(f"✅ سيتم إرسال تنبيه لـ {symbol}")
-
+                # منطق التنبيه
                 if symbol not in last_values:
                     last_values[symbol] = {"price": price, "change": change}
                     alert_counters[symbol] = 1
-                    await send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, vol_momentum, mbi, 1)
+                    await send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, market_cap, first_minute_vol, 1)
                 else:
+                    # تحديث عند تحرك 2%
                     if price >= last_values[symbol]["price"] * (1 + UPDATE_THRESHOLD):
                         last_values[symbol] = {"price": price, "change": change}
                         alert_counters[symbol] = alert_counters.get(symbol, 0) + 1
-                        await send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, vol_momentum, mbi, alert_counters[symbol])
+                        await send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, market_cap, first_minute_vol, alert_counters[symbol])
 
                 await asyncio.sleep(random.uniform(0.3, 0.6))
 
             print(f"✅ انتهى الفحص. انتظار 30 ثانية...")
             await asyncio.sleep(30)
+
+def calculate_vol_acc(volumes):
+    """تسارع الحجم (آخر شمعة مقارنة بمتوسط 5 شموع سابقة)"""
+    if len(volumes) < 6:
+        return 1.0
+    last = volumes[-1]
+    avg_5 = sum(volumes[-6:-1]) / 5
+    return last / avg_5 if avg_5 > 0 else 1.0
 
 if __name__ == "__main__":
     asyncio.run(main())
