@@ -74,6 +74,10 @@ async def fetch_all_tickers(session):
         return []
 
 async def fetch_stock_data(session, symbol):
+    # ===== إصلاح الرموز التي تحتوي على / =====
+    if '/' in symbol:
+        symbol = symbol.split('/')[0]
+    
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1m&range=1d"
         headers = {'User-Agent': 'Mozilla/5.0'}
