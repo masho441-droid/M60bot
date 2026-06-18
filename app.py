@@ -19,12 +19,12 @@ MAX_PRICE = 5.0
 MIN_VOLUME_RATIO = 1.5          # الشمعة الحالية > متوسط آخر 19 × 1.5
 MIN_LIQUIDITY_ACC = 1.5         # تسارع السيولة (آخر 3 / أول 2 من آخر 5)
 RSI_MIN = 45
-MIN_TRADE_VALUE = 250_000       # 250K دولار حد أدنى للسيولة
+MIN_TRADE_VALUE = 100_000       # 100K دولار حد أدنى للسيولة (تم التخفيض)
 
 # شروط Pre-Market و After-Hours (مخففة لكن دقيقة)
 PRE_AFTER_MIN_CHANGE = 1.0              # ارتفاع 1% على الأقل
 PRE_AFTER_MIN_VOLUME_RATIO = 2.0        # حجم أعلى (2x) لتعويض عدم وجود RSI و VWAP
-PRE_AFTER_MIN_TRADE_VALUE = 500_000     # سيولة أعلى (500K) لضمان جدية الحركة
+PRE_AFTER_MIN_TRADE_VALUE = 100_000     # 100K دولار (تم التخفيض)
 
 last_values = {}
 alert_counters = {}
@@ -204,9 +204,9 @@ async def send_alert(symbol, price, change, trade_value, volume_ratio, liquidity
         else:
             recommendation = "📊 مراقبة"
     else:  # pre_market أو after_hours
-        if change >= 2.0 and trade_value >= 500_000:
+        if change >= 2.0 and trade_value >= 100_000:
             recommendation = "🔥 إشارة قوية (Pre/After)"
-        elif change >= 1.0 and trade_value >= 500_000:
+        elif change >= 1.0 and trade_value >= 100_000:
             recommendation = "⏳ انتظار اختراق (Pre/After)"
         else:
             recommendation = "📊 مراقبة (Pre/After)"
@@ -246,7 +246,7 @@ async def send_alert(symbol, price, change, trade_value, volume_ratio, liquidity
 # ==================== الحلقة الرئيسية ====================
 async def main():
     await send_msg("✅ *بوت المؤشرات الفورية - يدعم Pre-Market و After-Hours*")
-    print("--- البوت يعمل بتحسين Pre-Market و After-Hours ---")
+    print("--- البوت يعمل بتحسين Pre-Market و After-Hours (سيولة 100K) ---")
 
     async with aiohttp.ClientSession() as session:
         while True:
