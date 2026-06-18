@@ -19,7 +19,7 @@ MAX_PRICE = 5.0
 MIN_VOLUME_RATIO = 1.5  # الشمعة الحالية > متوسط آخر 19 شمعة × 1.5
 MIN_LIQUIDITY_ACC = 1.5  # تسارع السيولة (آخر 3 شموع / أول 2 شموع)
 RSI_MIN = 45  # RSI فوق 45
-VWAP_BUY = True  # السعر فوق VWAP
+MIN_TRADE_VALUE = 250_000  # الحد الأدنى للسيولة (250K دولار) - يمنع الأسهم ضعيفة التداول
 
 last_values = {}
 alert_counters = {}
@@ -154,6 +154,9 @@ async def fetch_stock_data(session, symbol):
             # قيمة التداول
             trade_value = price * current_volume
             
+            # الأسهم الحرة (Free Float)
+            shares_outstanding = res.get('sharesOutstanding', 0)
+            
             return {
                 "symbol": symbol,
                 "price": price,
@@ -164,6 +167,7 @@ async def fetch_stock_data(session, symbol):
                 "vwap": vwap,
                 "rsi": rsi,
                 "trade_value": trade_value,
+                "shares_outstanding": shares_outstanding,
                 # المؤشرات المنطقية
                 "volume_signal": volume_signal,
                 "liquidity_signal": liquidity_signal,
@@ -175,16 +179,13 @@ async def fetch_stock_data(session, symbol):
         return None
 
 # ==================== إرسال التنبيه ====================
-async def send_alert(symbol, price, change, trade_value, volume_ratio, liquidity_acc, vwap, rsi, alert_num):
+async def send_alert(symbol, price, change, trade_value, volume_ratio, liquidity_acc, vwap, rsi, shares_outstanding, alert_num):
     now = get_ny_time().strftime("%H:%M:%S")
     
     # الأهداف الفنية
     resistance1 = price * 1.07
     resistance2 = price * 1.20
     support = price * 0.965
-    
-    # عدد الأسهم
-    shares_available = int(trade_value / price) if price > 0 else 0
     
     # تحديد التوصية بناءً على قوة الإشارات
     all_signals = all([volume_ratio >= 1.5, liquidity_acc >= 1.5, price > vwap, rsi >= 45])
@@ -196,6 +197,12 @@ async def send_alert(symbol, price, change, trade_value, volume_ratio, liquidity
     else:
         recommendation = "📊 مراقبة"
     
+    # تنسيق الأسهم الحرة (بالملايين)
+    if shares_outstanding >= 1_000_000:
+        shares_display = f"{shares_outstanding/1_000_000:.1f}M"
+    else:
+        shares_display = f"{shares_outstanding:,}"
+    
     msg = (
         f"📊 *{symbol}* — {now}\n\n"
         f"🔹 *الرمز:* `{symbol}`\n"
@@ -203,7 +210,7 @@ async def send_alert(symbol, price, change, trade_value, volume_ratio, liquidity
         f"🔹 *عدد مرات التنبيه اليوم:* {alert_num} مرة\n"
         f"🔹 *نسبة الارتفاع:* `+{change:.2f}%`\n"
         f"🔹 *السعر الحالي:* `{price:.3f} دولار`\n"
-        f"🔹 *عدد الأسهم المتاحة:* `{shares_available:,}`\n"
+        f"🔹 *الأسهم الحرة:* `{shares_display}`\n"
         f"🔹 *حجم السيولة:* `{trade_value/1000:.1f}K$`\n\n"
         f"📊 *المؤشرات الفورية:*\n"
         f"  • حجم الشمعة / متوسط 19: `{volume_ratio:.2f}x`\n"
@@ -222,7 +229,7 @@ async def send_alert(symbol, price, change, trade_value, volume_ratio, liquidity
 # ==================== الحلقة الرئيسية ====================
 async def main():
     await send_msg("✅ *بوت المؤشرات الفورية - انفجار سعري*")
-    print("--- البوت يعمل بالمؤشرات الفورية ---")
+    print("--- البوت يعمل بالمؤشرات الفورية (تحسين السيولة) ---")
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -252,6 +259,7 @@ async def main():
                 vwap = data["vwap"]
                 rsi = data["rsi"]
                 trade_value = data["trade_value"]
+                shares_outstanding = data["shares_outstanding"]
                 
                 volume_signal = data["volume_signal"]
                 liquidity_signal = data["liquidity_signal"]
@@ -261,17 +269,21 @@ async def main():
                 # ✅ شروط المؤشرات الفورية (جميعها مجتمعة)
                 if not (volume_signal and liquidity_signal and vwap_signal and rsi_signal):
                     continue
+                
+                # ✅ منع الأسهم ضعيفة السيولة
+                if trade_value < MIN_TRADE_VALUE:
+                    continue
 
                 # منطق التنبيه
                 if symbol not in last_values:
                     last_values[symbol] = {"price": price, "change": change}
                     alert_counters[symbol] = 1
-                    await send_alert(symbol, price, change, trade_value, volume_ratio, liquidity_acc, vwap, rsi, 1)
+                    await send_alert(symbol, price, change, trade_value, volume_ratio, liquidity_acc, vwap, rsi, shares_outstanding, 1)
                 else:
                     if price >= last_values[symbol]["price"] * (1 + 0.02):
                         last_values[symbol] = {"price": price, "change": change}
                         alert_counters[symbol] = alert_counters.get(symbol, 0) + 1
-                        await send_alert(symbol, price, change, trade_value, volume_ratio, liquidity_acc, vwap, rsi, alert_counters[symbol])
+                        await send_alert(symbol, price, change, trade_value, volume_ratio, liquidity_acc, vwap, rsi, shares_outstanding, alert_counters[symbol])
 
                 await asyncio.sleep(random.uniform(0.3, 0.6))
 
