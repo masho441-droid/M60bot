@@ -43,22 +43,20 @@ def is_trading_time():
     now = get_ny_time()
     current_time = now.time()
     
-    # جلسات العمل
-    pre_market_start = dt_time(4, 0)    # 4:00 ص
-    pre_market_end = dt_time(9, 30)     # 9:30 ص
-    regular_start = dt_time(9, 30)      # 9:30 ص
-    regular_end = dt_time(16, 0)        # 4:00 م
-    after_hours_start = dt_time(16, 0)  # 4:00 م
-    after_hours_end = dt_time(20, 0)    # 8:00 م
+    pre_market_start = dt_time(4, 0)
+    pre_market_end = dt_time(9, 30)
+    regular_start = dt_time(9, 30)
+    regular_end = dt_time(16, 0)
+    after_hours_start = dt_time(16, 0)
+    after_hours_end = dt_time(20, 0)
 
-    # نتحقق من أن الوقت داخل أي من الجلسات الثلاث
     is_pre = pre_market_start <= current_time < pre_market_end
     is_regular = regular_start <= current_time < regular_end
     is_after = after_hours_start <= current_time < after_hours_end
 
     return is_pre or is_regular or is_after
 
-# ==================== جلب البيانات ====================
+# ==================== جلب البيانات مع دعم البري ماركت وحساب الحجم من الشموع ====================
 async def fetch_all_tickers(session):
     url = "https://scanner.tradingview.com/america/scan"
     payload = {
@@ -82,14 +80,23 @@ async def fetch_stock_data(session, symbol):
         async with session.get(url, headers=headers, timeout=5) as resp:
             data = await resp.json()
             res = data['chart']['result'][0]['meta']
-            price = res.get('regularMarketPrice')
-            vol = res.get('regularMarketVolume')
+            
+            # محاولة جلب بيانات البري ماركت أولاً
+            price = res.get('preMarketPrice') or res.get('regularMarketPrice')
+            
+            # حساب الحجم من الشموع اللحظية (آخر 5 شموع)
+            quote = data['chart']['result'][0]['indicators']['quote'][0]
+            volumes = [v for v in quote.get('volume', []) if v]
+            vol = sum(volumes[-5:]) if volumes else res.get('preMarketVolume') or res.get('regularMarketVolume', 0)
+            
             if not price or not vol:
                 return None
+            
             prev_close = res.get('regularMarketPreviousClose', res.get('previousClose', price))
             change = ((price - prev_close) / prev_close) * 100
-            volumes = [v for v in data['chart']['result'][0]['indicators']['quote'][0]['volume'] if v]
-            price_history = [c for c in data['chart']['result'][0]['indicators']['quote'][0]['close'] if c]
+            
+            price_history = [c for c in quote.get('close', []) if c]
+            
             return {
                 "symbol": symbol,
                 "price": price,
@@ -99,7 +106,8 @@ async def fetch_stock_data(session, symbol):
                 "price_history": price_history,
                 "prev_close": prev_close
             }
-    except:
+    except Exception as e:
+        print(f"خطأ في {symbol}: {e}")
         return None
 
 def calculate_vol_acc(volumes):
@@ -144,7 +152,6 @@ async def main():
 
     async with aiohttp.ClientSession() as session:
         while True:
-            # التحقق من وقت العمل
             if not is_trading_time():
                 now = get_ny_time().strftime("%H:%M:%S")
                 print(f"⏸️ خارج أوقات التداول ({now}). انتظار 5 دقائق...")
@@ -166,7 +173,6 @@ async def main():
                 volume = data["volume"]
                 change = data["change"]
                 volumes = data["volumes"]
-                price_history = data["price_history"]
 
                 rel_vol = volume / 500000
                 vol_acc = calculate_vol_acc(volumes)
