@@ -11,23 +11,15 @@ TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 bot = Bot(token=TOKEN)
 
-# ==================== معايير الاستراتيجية (بعد زيادة الصرامة) ====================
+# ==================== معايير المؤشرات الفورية ====================
 MIN_PRICE = 0.5
 MAX_PRICE = 5.0
-MIN_CHANGE = 0.5  # تم الرفع من 0.3% إلى 0.5%
-MIN_REL_VOL = 0.4  # تم الرفع من 0.3X إلى 0.4X
-MIN_TRADE_VALUE = 100_000  # سيولة 100K$
-UPDATE_THRESHOLD = 0.02  # تحديث عند تحرك 2%
 
-# نسب الأهداف الفنية (ديناميكية)
-RESISTANCE_1_RATIO = 1.07  # مقاومة 1 = سعر + 7%
-RESISTANCE_2_RATIO = 1.20  # مقاومة 2 = سعر + 20%
-SUPPORT_RATIO = 0.965  # الدعم = سعر - 3.5%
-
-# ==================== مؤشر قوة الاندفاع (مع زيادة الصرامة) ====================
-MIN_VSR_FOR_ALERT = 1.5  # ✅ شرط أساسي: لا تنبيه بدون VSR ≥ 1.5
-VSR_STRONG = 2.0  # اندفاع قوي (دخول فوري)
-VSR_GOOD = 1.5  # اندفاع جيد (انتظار اختراق)
+# شروط المؤشرات (فورية)
+MIN_VOLUME_RATIO = 1.5  # الشمعة الحالية > متوسط آخر 19 شمعة × 1.5
+RSI_MIN = 45  # RSI فوق 45
+VWAP_BUY = True  # السعر فوق VWAP
+MA_ORDER = True  # MA10 > MA20 > MA50
 
 last_values = {}
 alert_counters = {}
@@ -82,7 +74,7 @@ async def fetch_stock_data(session, symbol):
         symbol = symbol.split('/')[0]
     
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1m&range=1d"
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=5m&range=5d"
         headers = {'User-Agent': 'Mozilla/5.0'}
         async with session.get(url, headers=headers, timeout=5) as resp:
             data = await resp.json()
@@ -91,112 +83,140 @@ async def fetch_stock_data(session, symbol):
                 return None
             
             res = data['chart']['result'][0]['meta']
+            chart = data['chart']['result'][0]
             
-            # السعر الحالي
-            price = res.get('preMarketPrice') or res.get('regularMarketPrice')
+            # بيانات الشموع (5 دقائق)
+            ohlcv = chart['indicators']['quote'][0]
+            closes = [c for c in ohlcv.get('close', []) if c]
+            highs = [h for h in ohlcv.get('high', []) if h]
+            lows = [l for l in ohlcv.get('low', []) if l]
+            volumes = [v for v in ohlcv.get('volume', []) if v]
             
-            quote = data['chart']['result'][0]['indicators']['quote'][0]
-            volumes = [v for v in quote.get('volume', []) if v]
-            
-            # الحجم الإجمالي (آخر 5 شموع)
-            vol = sum(volumes[-5:]) if volumes else res.get('preMarketVolume') or res.get('regularMarketVolume', 0)
-            
-            if not price or not vol:
+            if not closes or not volumes:
                 return None
             
-            prev_close = res.get('regularMarketPreviousClose', res.get('previousClose', price))
+            # السعر الحالي
+            price = closes[-1] if closes else 0
+            if not price:
+                return None
+            
+            # التغير
+            prev_close = res.get('regularMarketPreviousClose', price)
             change = ((price - prev_close) / prev_close) * 100
             
-            # حجم أول دقيقة
-            first_minute_vol = volumes[0] if volumes and len(volumes) > 0 else 0
+            # ==================== المؤشرات الفورية ====================
             
-            # القيمة السوقية
-            market_cap = res.get('marketCap', 0)
+            # 1. الشمعة الحالية > متوسط آخر 19 شمعة × 1.5 (فوري)
+            current_volume = volumes[-1] if volumes else 0
+            if len(volumes) >= 20:
+                avg_19_volume = sum(volumes[-20:-1]) / 19
+            else:
+                avg_19_volume = current_volume
+            volume_ratio = current_volume / avg_19_volume if avg_19_volume > 0 else 1.0
+            volume_signal = volume_ratio >= MIN_VOLUME_RATIO
+            
+            # 2. VWAP (من بداية الجلسة)
+            vwap = 0
+            if len(closes) >= 2:
+                typical_prices = [(h + l + c) / 3 for h, l, c in zip(highs, lows, closes)]
+                if sum(volumes) > 0:
+                    vwap = sum(tp * v for tp, v in zip(typical_prices, volumes)) / sum(volumes)
+            vwap_signal = price > vwap
+            
+            # 3. RSI (14 شمعة - فوري)
+            rsi = 50
+            if len(closes) >= 15:
+                gains = []
+                losses = []
+                for i in range(1, 15):
+                    diff = closes[-i] - closes[-i-1]
+                    if diff > 0:
+                        gains.append(diff)
+                    else:
+                        losses.append(abs(diff))
+                avg_gain = sum(gains) / 14 if gains else 0
+                avg_loss = sum(losses) / 14 if losses else 0
+                if avg_loss == 0:
+                    rsi = 100
+                else:
+                    rs = avg_gain / avg_loss
+                    rsi = 100 - (100 / (1 + rs))
+            rsi_signal = rsi >= RSI_MIN
+            
+            # 4. ترتيب المتوسطات (فوري)
+            ma10 = sum(closes[-10:]) / 10 if len(closes) >= 10 else price
+            ma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else price
+            ma50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else price
+            ma_signal = ma10 > ma20 > ma50
+            
+            # قيمة التداول
+            trade_value = price * current_volume
             
             return {
                 "symbol": symbol,
                 "price": price,
-                "volume": vol,
                 "change": change,
-                "volumes": volumes,
-                "prev_close": prev_close,
-                "first_minute_vol": first_minute_vol,
-                "market_cap": market_cap
+                "volume": current_volume,
+                "volume_ratio": volume_ratio,
+                "vwap": vwap,
+                "rsi": rsi,
+                "ma10": ma10,
+                "ma20": ma20,
+                "ma50": ma50,
+                "trade_value": trade_value,
+                # المؤشرات المنطقية
+                "volume_signal": volume_signal,
+                "vwap_signal": vwap_signal,
+                "rsi_signal": rsi_signal,
+                "ma_signal": ma_signal
             }
     except Exception as e:
         print(f"خطأ في {symbol}: {e}")
         return None
 
-def calculate_vsr(volumes):
-    """
-    قوة الاندفاع (Volume Surge Ratio)
-    = حجم أول دقيقة ÷ متوسط حجم آخر 5 دقائق
-    """
-    if len(volumes) < 6:
-        return 1.0
-    first_minute = volumes[0] if volumes else 0
-    avg_5 = sum(volumes[-5:]) / 5 if volumes else 1
-    return first_minute / avg_5 if avg_5 > 0 else 1.0
-
-def get_vsr_status(vsr):
-    """تحديد حالة قوة الاندفاع"""
-    if vsr >= VSR_STRONG:
-        return "🔥 اندفاع قوي (دخول فوري)"
-    elif vsr >= VSR_GOOD:
-        return "✅ اندفاع جيد (انتظار اختراق)"
-    else:
-        return "📉 اندفاع ضعيف (مراقبة)"
-
 # ==================== إرسال التنبيه ====================
-async def send_alert(symbol, price, change, rel_vol, trade_value, market_cap, first_minute_vol, alert_num, vsr):
+async def send_alert(symbol, price, change, trade_value, volume_ratio, vwap, rsi, ma10, ma20, ma50, alert_num):
     now = get_ny_time().strftime("%H:%M:%S")
     
-    # حساب الأهداف الفنية (ديناميكية)
-    resistance1 = price * RESISTANCE_1_RATIO
-    resistance2 = price * RESISTANCE_2_RATIO
-    support = price * SUPPORT_RATIO
+    # الأهداف الفنية
+    resistance1 = price * 1.07
+    resistance2 = price * 1.20
+    support = price * 0.965
     
-    # عدد الأسهم المتاحة
+    # عدد الأسهم
     shares_available = int(trade_value / price) if price > 0 else 0
     
-    # حجم السيولة بالألف
-    liquidity = trade_value / 1000
-    
-    # حالة قوة الاندفاع
-    vsr_status = get_vsr_status(vsr)
-    
-    # تحديد نوع التنبيه
-    if alert_num == 1:
-        alert_type = "زخم شرائي 5 دقائق"
-    else:
-        alert_type = f"تحديث زخم #{alert_num}"
+    # تحديد التوصية
+    all_signals = all([volume_ratio >= 1.5, price > vwap, rsi >= 45, ma10 > ma20 > ma50])
+    recommendation = "🔥 إشارة انفجار قوية - دخول فوري" if all_signals else "⏳ إشارة غير مكتملة - مراقبة"
     
     msg = (
         f"📊 *{symbol}* — {now}\n\n"
         f"🔹 *الرمز:* `{symbol}`\n"
-        f"🔹 *نوع الحركة:* {alert_type}\n"
+        f"🔹 *نوع الحركة:* مؤشرات انفجار فورية\n"
         f"🔹 *عدد مرات التنبيه اليوم:* {alert_num} مرة\n"
-        f"🔹 *نسبة الارتفاع:* `+{change:.1f}%`\n"
+        f"🔹 *نسبة الارتفاع:* `+{change:.2f}%`\n"
         f"🔹 *السعر الحالي:* `{price:.3f} دولار`\n"
-        f"🔹 *عدد الأسهم المتاحة للتداول:* `{shares_available:,}`\n"
-        f"🔹 *القيمة السوقية:* `{market_cap/1_000_000:.1f}M`\n"
-        f"🔹 *الحجم النسبي:* `{rel_vol:.1f}X`\n"
-        f"🔹 *حجم أول دقيقة:* `{first_minute_vol:,}`\n"
-        f"🔹 *حجم السيولة:* `{liquidity:.1f}K$`\n"
-        f"🔹 *قوة الاندفاع:* `{vsr:.1f}x` {vsr_status}\n\n"
+        f"🔹 *عدد الأسهم المتاحة:* `{shares_available:,}`\n"
+        f"🔹 *حجم السيولة:* `{trade_value/1000:.1f}K$`\n\n"
+        f"📊 *المؤشرات الفورية:*\n"
+        f"  • حجم الشمعة/متوسط 19: `{volume_ratio:.2f}x` {'✅' if volume_ratio >= 1.5 else '❌'}\n"
+        f"  • السعر > VWAP: `{vwap:.3f}` ({'✅' if price > vwap else '❌'})\n"
+        f"  • RSI (14): `{rsi:.1f}` ({'✅' if rsi >= 45 else '❌'})\n"
+        f"  • ترتيب MA: `{ma10:.3f}` > `{ma20:.3f}` > `{ma50:.3f}` {'✅' if ma10 > ma20 > ma50 else '❌'}\n\n"
         f"🎯 *الأهداف الفنية:*\n"
-        f"  • مقاومة 1: `{resistance1:.3f} دولار`\n"
-        f"  • مقاومة 2: `{resistance2:.3f} دولار`\n"
-        f"  • الدعم: `{support:.3f} دولار`\n\n"
-        f"📌 *توصية:* {vsr_status}\n"
+        f"  • مقاومة 1: `{resistance1:.3f}`\n"
+        f"  • مقاومة 2: `{resistance2:.3f}`\n"
+        f"  • الدعم: `{support:.3f}`\n\n"
+        f"📌 *توصية:* {recommendation}\n"
         f"⏰ *التوقيت الأمريكي:* `{now}`"
     )
     await send_msg(msg)
 
 # ==================== الحلقة الرئيسية ====================
 async def main():
-    await send_msg("✅ *بوت زخم 5 دقائق - استراتيجية محسنة*")
-    print("--- البوت يعمل بالاستراتيجية المطورة (صرامة أعلى) ---")
+    await send_msg("✅ *بوت المؤشرات الفورية - انفجار سعري*")
+    print("--- البوت يعمل بالمؤشرات الفورية ---")
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -220,42 +240,34 @@ async def main():
 
                 symbol = data["symbol"]
                 price = data["price"]
-                volume = data["volume"]
                 change = data["change"]
-                volumes = data["volumes"]
-                first_minute_vol = data["first_minute_vol"]
-                market_cap = data["market_cap"]
-
-                # حساب المؤشرات
-                rel_vol = volume / 500000
-                trade_value = price * volume
-                vsr = calculate_vsr(volumes)  # قوة الاندفاع
-
-                # ✅ شروط الاستراتيجية (بعد زيادة الصرامة)
-                if change < MIN_CHANGE:
-                    continue
-                if rel_vol < MIN_REL_VOL:
-                    continue
-                if trade_value < MIN_TRADE_VALUE:
-                    continue
-                if price < MIN_PRICE or price > MAX_PRICE:
-                    continue
+                volume_ratio = data["volume_ratio"]
+                vwap = data["vwap"]
+                rsi = data["rsi"]
+                ma10 = data["ma10"]
+                ma20 = data["ma20"]
+                ma50 = data["ma50"]
+                trade_value = data["trade_value"]
                 
-                # ✅ الشرط الجديد: لا تنبيه بدون قوة اندفاع كافية
-                if vsr < MIN_VSR_FOR_ALERT:
+                volume_signal = data["volume_signal"]
+                vwap_signal = data["vwap_signal"]
+                rsi_signal = data["rsi_signal"]
+                ma_signal = data["ma_signal"]
+
+                # ✅ شروط المؤشرات الفورية (جميعها مجتمعة)
+                if not (volume_signal and vwap_signal and rsi_signal and ma_signal):
                     continue
 
                 # منطق التنبيه
                 if symbol not in last_values:
                     last_values[symbol] = {"price": price, "change": change}
                     alert_counters[symbol] = 1
-                    await send_alert(symbol, price, change, rel_vol, trade_value, market_cap, first_minute_vol, 1, vsr)
+                    await send_alert(symbol, price, change, trade_value, volume_ratio, vwap, rsi, ma10, ma20, ma50, 1)
                 else:
-                    # تحديث عند تحرك 2%
-                    if price >= last_values[symbol]["price"] * (1 + UPDATE_THRESHOLD):
+                    if price >= last_values[symbol]["price"] * (1 + 0.02):
                         last_values[symbol] = {"price": price, "change": change}
                         alert_counters[symbol] = alert_counters.get(symbol, 0) + 1
-                        await send_alert(symbol, price, change, rel_vol, trade_value, market_cap, first_minute_vol, alert_counters[symbol], vsr)
+                        await send_alert(symbol, price, change, trade_value, volume_ratio, vwap, rsi, ma10, ma20, ma50, alert_counters[symbol])
 
                 await asyncio.sleep(random.uniform(0.3, 0.6))
 
