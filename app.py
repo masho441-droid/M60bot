@@ -11,15 +11,14 @@ TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 bot = Bot(token=TOKEN)
 
-# ==================== المعايير ====================
+# ==================== المعايير (بدون دوران) ====================
 MIN_PRICE = 0.5
 MAX_PRICE = 5.0
-MIN_CHANGE = 3.0
-MIN_REL_VOL = 3.0
-MIN_VOL_ACC = 2.5
-MIN_TRADE_VALUE = 1_000_000
-MIN_TURNOVER = 15.0
-MIN_MBI = 1.2
+MIN_CHANGE = 1.0
+MIN_REL_VOL = 1.5
+MIN_VOL_ACC = 1.2
+MIN_TRADE_VALUE = 200000
+MIN_MBI = 0.8
 UPDATE_THRESHOLD = 0.05
 
 last_values = {}
@@ -118,37 +117,33 @@ def calculate_vol_acc(volumes):
     avg_5 = sum(volumes[-6:-1]) / 5
     return last / avg_5 if avg_5 > 0 else 1.0
 
-def calculate_turnover(volume):
-    return (volume / 1_000_000) * 100
-
 # ==================== إرسال التنبيه ====================
-async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turnover, mbi, alert_num):
+async def send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, mbi, alert_num):
     now = get_ny_time().strftime("%H:%M:%S")
     target1 = price * 1.5
     target2 = price * 2.0
     target3 = price * 2.5
     stop = price * 0.90
     success = "82% - 92%"
-    update_type = "تحديث زخم - دخول مع إعادة الاختبار" if alert_num > 1 else "تنبيه أولي - مراقبة"
+    update_type = "تحديث زخم" if alert_num > 1 else "تنبيه أولي"
     
     msg = (
-        f"🔥 *M60 Hunter - صيد مبكر متقدم*\n\n"
+        f"🔥 *M60 Hunter*\n\n"
         f"⏰ *الوقت:* `{now}`\n"
         f"🔴 *الرمز:* `{symbol}` | 📊 *رقم التنبيه:* `#{alert_num}`\n\n"
         f"💰 *السعر:* `{price:.2f}`     📈 *الصعود:* `+{change:.2f}%`\n"
         f"📊 *الحجم:* `{rel_vol:.1f}x`     🚀 *التسارع:* `{vol_acc:.1f}x`\n"
-        f"💵 *القيمة:* `{trade_value/1_000_000:.2f}M`   📊 *الدوران:* `{turnover:.1f}%`\n\n"
+        f"💵 *القيمة:* `{trade_value/1_000_000:.2f}M`\n\n"
         f"🎯 *الأهداف:* `{target1:.2f}` | `{target2:.2f}` | `{target3:.2f}`\n"
         f"🛑 *وقف الخسارة:* `{stop:.2f}`\n"
         f"📈 *نسبة النجاح:* `{success}`\n\n"
-        f"📌 *توصية:* {update_type}\n"
-        f"✨ *M60 Hunter*"
+        f"📌 *توصية:* {update_type}"
     )
     await send_msg(msg)
 
-# ==================== الحلقة الرئيسية مع التتبع ====================
+# ==================== الحلقة الرئيسية ====================
 async def main():
-    await send_msg("✅ *M60 Hunter - صيد مبكر متقدم*")
+    await send_msg("✅ *M60 Hunter يعمل*")
     print("--- البوت يعمل ---")
 
     async with aiohttp.ClientSession() as session:
@@ -180,26 +175,24 @@ async def main():
                 rel_vol = volume / 500000
                 vol_acc = calculate_vol_acc(volumes)
                 trade_value = price * volume
-                turnover = calculate_turnover(volume)
                 mbi = calculate_mbi(change, rel_vol)
 
                 if (change < MIN_CHANGE or rel_vol < MIN_REL_VOL or
                     vol_acc < MIN_VOL_ACC or trade_value < MIN_TRADE_VALUE or
-                    turnover < MIN_TURNOVER or mbi < MIN_MBI):
+                    mbi < MIN_MBI):
                     continue
 
-                # إذا وصل إلى هنا، فهذا يعني أن السهم يحقق المعايير
                 print(f"✅ سيتم إرسال تنبيه لـ {symbol}")
 
                 if symbol not in last_values:
                     last_values[symbol] = {"price": price, "change": change}
                     alert_counters[symbol] = 1
-                    await send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turnover, mbi, 1)
+                    await send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, mbi, 1)
                 else:
                     if price >= last_values[symbol]["price"] * (1 + UPDATE_THRESHOLD):
                         last_values[symbol] = {"price": price, "change": change}
                         alert_counters[symbol] = alert_counters.get(symbol, 0) + 1
-                        await send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, turnover, mbi, alert_counters[symbol])
+                        await send_alert(symbol, price, change, rel_vol, vol_acc, trade_value, mbi, alert_counters[symbol])
 
                 await asyncio.sleep(random.uniform(0.3, 0.6))
 
