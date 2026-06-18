@@ -17,9 +17,9 @@ MAX_PRICE = 5.0
 
 # شروط المؤشرات (فورية)
 MIN_VOLUME_RATIO = 1.5  # الشمعة الحالية > متوسط آخر 19 شمعة × 1.5
+MIN_LIQUIDITY_ACC = 1.5  # تسارع السيولة (آخر 3 شموع / أول 2 شموع)
 RSI_MIN = 45  # RSI فوق 45
 VWAP_BUY = True  # السعر فوق VWAP
-MA_ORDER = True  # MA10 > MA20 > MA50
 
 last_values = {}
 alert_counters = {}
@@ -115,7 +115,15 @@ async def fetch_stock_data(session, symbol):
             volume_ratio = current_volume / avg_19_volume if avg_19_volume > 0 else 1.0
             volume_signal = volume_ratio >= MIN_VOLUME_RATIO
             
-            # 2. VWAP (من بداية الجلسة)
+            # 2. تسارع السيولة (آخر 3 شموع / أول 2 شموع من آخر 5)
+            liquidity_acc = 1.0
+            if len(volumes) >= 5:
+                recent_avg = sum(volumes[-3:]) / 3
+                old_avg = sum(volumes[-5:-3]) / 2
+                liquidity_acc = recent_avg / old_avg if old_avg > 0 else 1.0
+            liquidity_signal = liquidity_acc >= MIN_LIQUIDITY_ACC
+            
+            # 3. VWAP (من بداية الجلسة)
             vwap = 0
             if len(closes) >= 2:
                 typical_prices = [(h + l + c) / 3 for h, l, c in zip(highs, lows, closes)]
@@ -123,7 +131,7 @@ async def fetch_stock_data(session, symbol):
                     vwap = sum(tp * v for tp, v in zip(typical_prices, volumes)) / sum(volumes)
             vwap_signal = price > vwap
             
-            # 3. RSI (14 شمعة - فوري)
+            # 4. RSI (14 شمعة - فوري)
             rsi = 50
             if len(closes) >= 15:
                 gains = []
@@ -143,12 +151,6 @@ async def fetch_stock_data(session, symbol):
                     rsi = 100 - (100 / (1 + rs))
             rsi_signal = rsi >= RSI_MIN
             
-            # 4. ترتيب المتوسطات (فوري)
-            ma10 = sum(closes[-10:]) / 10 if len(closes) >= 10 else price
-            ma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else price
-            ma50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else price
-            ma_signal = ma10 > ma20 > ma50
-            
             # قيمة التداول
             trade_value = price * current_volume
             
@@ -158,24 +160,22 @@ async def fetch_stock_data(session, symbol):
                 "change": change,
                 "volume": current_volume,
                 "volume_ratio": volume_ratio,
+                "liquidity_acc": liquidity_acc,
                 "vwap": vwap,
                 "rsi": rsi,
-                "ma10": ma10,
-                "ma20": ma20,
-                "ma50": ma50,
                 "trade_value": trade_value,
                 # المؤشرات المنطقية
                 "volume_signal": volume_signal,
+                "liquidity_signal": liquidity_signal,
                 "vwap_signal": vwap_signal,
-                "rsi_signal": rsi_signal,
-                "ma_signal": ma_signal
+                "rsi_signal": rsi_signal
             }
     except Exception as e:
         print(f"خطأ في {symbol}: {e}")
         return None
 
 # ==================== إرسال التنبيه ====================
-async def send_alert(symbol, price, change, trade_value, volume_ratio, vwap, rsi, ma10, ma20, ma50, alert_num):
+async def send_alert(symbol, price, change, trade_value, volume_ratio, liquidity_acc, vwap, rsi, alert_num):
     now = get_ny_time().strftime("%H:%M:%S")
     
     # الأهداف الفنية
@@ -186,9 +186,15 @@ async def send_alert(symbol, price, change, trade_value, volume_ratio, vwap, rsi
     # عدد الأسهم
     shares_available = int(trade_value / price) if price > 0 else 0
     
-    # تحديد التوصية
-    all_signals = all([volume_ratio >= 1.5, price > vwap, rsi >= 45, ma10 > ma20 > ma50])
-    recommendation = "🔥 إشارة انفجار قوية - دخول فوري" if all_signals else "⏳ إشارة غير مكتملة - مراقبة"
+    # تحديد التوصية بناءً على قوة الإشارات
+    all_signals = all([volume_ratio >= 1.5, liquidity_acc >= 1.5, price > vwap, rsi >= 45])
+    
+    if all_signals:
+        recommendation = "🔥 إشارة قوية"
+    elif volume_ratio >= 1.5 and liquidity_acc >= 1.5:
+        recommendation = "⏳ انتظار اختراق"
+    else:
+        recommendation = "📊 مراقبة"
     
     msg = (
         f"📊 *{symbol}* — {now}\n\n"
@@ -200,10 +206,10 @@ async def send_alert(symbol, price, change, trade_value, volume_ratio, vwap, rsi
         f"🔹 *عدد الأسهم المتاحة:* `{shares_available:,}`\n"
         f"🔹 *حجم السيولة:* `{trade_value/1000:.1f}K$`\n\n"
         f"📊 *المؤشرات الفورية:*\n"
-        f"  • حجم الشمعة/متوسط 19: `{volume_ratio:.2f}x` {'✅' if volume_ratio >= 1.5 else '❌'}\n"
-        f"  • السعر > VWAP: `{vwap:.3f}` ({'✅' if price > vwap else '❌'})\n"
-        f"  • RSI (14): `{rsi:.1f}` ({'✅' if rsi >= 45 else '❌'})\n"
-        f"  • ترتيب MA: `{ma10:.3f}` > `{ma20:.3f}` > `{ma50:.3f}` {'✅' if ma10 > ma20 > ma50 else '❌'}\n\n"
+        f"  • حجم الشمعة / متوسط 19: `{volume_ratio:.2f}x`\n"
+        f"  • تسارع السيولة (5 شموع): `{liquidity_acc:.2f}x`\n"
+        f"  • آر إس آي (14): `{rsi:.1f}`\n"
+        f"  • السعر > VWAP: `{vwap:.3f}`\n\n"
         f"🎯 *الأهداف الفنية:*\n"
         f"  • مقاومة 1: `{resistance1:.3f}`\n"
         f"  • مقاومة 2: `{resistance2:.3f}`\n"
@@ -242,32 +248,30 @@ async def main():
                 price = data["price"]
                 change = data["change"]
                 volume_ratio = data["volume_ratio"]
+                liquidity_acc = data["liquidity_acc"]
                 vwap = data["vwap"]
                 rsi = data["rsi"]
-                ma10 = data["ma10"]
-                ma20 = data["ma20"]
-                ma50 = data["ma50"]
                 trade_value = data["trade_value"]
                 
                 volume_signal = data["volume_signal"]
+                liquidity_signal = data["liquidity_signal"]
                 vwap_signal = data["vwap_signal"]
                 rsi_signal = data["rsi_signal"]
-                ma_signal = data["ma_signal"]
 
                 # ✅ شروط المؤشرات الفورية (جميعها مجتمعة)
-                if not (volume_signal and vwap_signal and rsi_signal and ma_signal):
+                if not (volume_signal and liquidity_signal and vwap_signal and rsi_signal):
                     continue
 
                 # منطق التنبيه
                 if symbol not in last_values:
                     last_values[symbol] = {"price": price, "change": change}
                     alert_counters[symbol] = 1
-                    await send_alert(symbol, price, change, trade_value, volume_ratio, vwap, rsi, ma10, ma20, ma50, 1)
+                    await send_alert(symbol, price, change, trade_value, volume_ratio, liquidity_acc, vwap, rsi, 1)
                 else:
                     if price >= last_values[symbol]["price"] * (1 + 0.02):
                         last_values[symbol] = {"price": price, "change": change}
                         alert_counters[symbol] = alert_counters.get(symbol, 0) + 1
-                        await send_alert(symbol, price, change, trade_value, volume_ratio, vwap, rsi, ma10, ma20, ma50, alert_counters[symbol])
+                        await send_alert(symbol, price, change, trade_value, volume_ratio, liquidity_acc, vwap, rsi, alert_counters[symbol])
 
                 await asyncio.sleep(random.uniform(0.3, 0.6))
 
