@@ -6,7 +6,6 @@ import pytz
 import requests
 from datetime import datetime, time as dt_time
 from telegram import Bot
-from tradingview_screener import Query  # <-- التعديل هنا
 
 # ================= LOGGING =================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
@@ -54,21 +53,38 @@ def session():
 # ================= TELEGRAM =================
 async def send(msg):
     try:
-        await bot.send_message(chat_id=CHAT_ID, text=msg)
+        await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
     except Exception as e:
         logging.error(e)
 
-# ================= DATA LAYER (المعدلة) =================
+# ================= DATA LAYER (الطلب المباشر) =================
 def fetch_screener():
     try:
-        q = Query()
-        q = q.select('ticker', 'close', 'change', 'volume', 'market_cap_basic', 'relative_volume_24h')
-        q = q.where(f'close >= {MIN_PRICE} AND close <= {MAX_PRICE}')
-        q = q.order_by('volume', ascending=False)
-        q = q.limit(200)
+        url = "https://scanner.tradingview.com/america/scan"
+        payload = {
+            "filter": [
+                {"left": "close", "operation": "in_range", "right": [MIN_PRICE, MAX_PRICE]}
+            ],
+            "columns": ["name", "close", "change", "volume"],
+            "options": {"lang": "en"},
+            "symbols": {"query": {"types": []}, "tickers": []}
+        }
 
-        _, df = q.get_scanner_data()
-        return df.to_dict("records") if df is not None else []
+        r = requests.post(url, json=payload, timeout=10)
+        data = r.json()
+
+        stocks = []
+        for item in data.get("data", []):
+            d = item["d"]
+            if len(d) >= 4:
+                stocks.append({
+                    "ticker": d[0],
+                    "close": d[1],
+                    "change": d[2],
+                    "volume": d[3]
+                })
+
+        return stocks
 
     except Exception as e:
         logging.error(f"Error fetching data: {e}")
@@ -90,9 +106,9 @@ def finnhub_price(symbol):
 # ================= FILTER =================
 def valid(s):
     try:
-        sym = s.get("ticker") or s.get("symbol")
-        price = float(s.get("close") or s.get("price") or 0)
-        change = float(str(s.get("change") or 0).replace("%", ""))
+        sym = s.get("ticker")
+        price = float(s.get("close") or 0)
+        change = float(s.get("change") or 0)
         vol = float(s.get("volume") or 0)
 
         if not sym:
@@ -116,8 +132,8 @@ def detect(stocks):
         if not valid(s):
             continue
 
-        sym = s.get("ticker") or s.get("symbol")
-        price = float(s.get("close") or s.get("price") or 0)
+        sym = s.get("ticker")
+        price = float(s.get("close") or 0)
 
         prev = last_price.get(sym)
         if not prev:
