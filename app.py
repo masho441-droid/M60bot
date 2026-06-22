@@ -29,12 +29,14 @@ MAX_PRICE = 10.0
 MIN_MOVE = 1.2
 MIN_VOLUME = 100000
 COOLDOWN = 120
-MIN_REL_VOL = 1.5  # الحجم النسبي
+MIN_REL_VOL = 1.5
+MIN_MOMENTUM_ACC = 1.2
 
 last_price = {}
-last_move = {}
 last_alert = {}
 alert_counters = {}
+last_momentum = {}
+alert_history = {}
 
 # ================= TIME =================
 def ny():
@@ -70,7 +72,7 @@ def fetch_finnhub_stocks():
         symbols = list_res.json()
 
         stocks = []
-        for item in symbols[:30]:  # 30 سهم فقط لتجنب تجاوز 60 طلب/دقيقة
+        for item in symbols[:30]:
             symbol = item.get("symbol")
             if not symbol:
                 continue
@@ -98,6 +100,20 @@ def fetch_finnhub_stocks():
     except Exception as e:
         logging.error(f"Error fetching from Finnhub: {e}")
         return []
+
+# ================= VOLUME RATIO =================
+def get_avg_volume(symbol):
+    try:
+        # محاولة جلب متوسط الحجم من Finnhub
+        url = f"https://finnhub.io/api/v1/stock/earnings?symbol={symbol}&token={FINNHUB_KEY}"
+        # للتبسيط نستخدم قيمة ثابتة، يمكن تحسينها لاحقاً
+        return 100000
+    except:
+        return 100000
+
+def calculate_rel_vol(volume, symbol):
+    avg_vol = get_avg_volume(symbol)
+    return volume / avg_vol if avg_vol > 0 else 1.0
 
 # ================= FILTER =================
 def valid(s):
@@ -130,79 +146,98 @@ def detect(stocks):
 
         sym = s.get("ticker")
         price = float(s.get("close") or 0)
-        change = float(s.get("change") or 0)
         volume = float(s.get("volume") or 0)
 
-        # ===== تسارع الزخم =====
-        prev_move = last_move.get(sym, change)
-        momentum_acc = change - prev_move
-        last_move[sym] = change
+        rel_vol = calculate_rel_vol(volume, sym)
 
-        # ===== الحجم النسبي (تقديري) =====
-        # في حالة عدم وجود متوسط تاريخي، نستخدم قيمة افتراضية
-        rel_vol = 1.0  # سيتم تحديثها لاحقاً إذا توفرت البيانات
+        prev_move = last_momentum.get(sym, 0)
+        current_move = float(s.get("change") or 0)
 
-        # ===== الحركة الفعلية =====
-        prev_price = last_price.get(sym)
-        if not prev_price:
-            last_price[sym] = price
+        momentum_acc = current_move / prev_move if prev_move != 0 else 1.0
+
+        if rel_vol < MIN_REL_VOL:
+            continue
+        if momentum_acc < MIN_MOMENTUM_ACC:
             continue
 
-        move = ((price - prev_price) / prev_price) * 100 if prev_price else 0
-        last_price[sym] = price
-
-        if move < MIN_MOVE:
-            continue
-
-        # ===== منع التكرار =====
         now = ny().timestamp()
         if now - last_alert.get(sym, 0) < COOLDOWN:
             continue
 
-        # ===== تصنيف القوة =====
-        if move > 3.0 and volume > 500000 and momentum_acc > 1.0:
-            strength = "💥 قوية جداً"
-            strength_score = 4
-        elif move > 2.0 and volume > 200000 and momentum_acc > 0.5:
-            strength = "🚀 قوية"
-            strength_score = 3
-        elif move > 1.5 and volume > 150000:
-            strength = "📈 متوسطة"
-            strength_score = 2
-        else:
-            strength = "👀 ضعيفة"
-            strength_score = 1
-
-        # ===== الأهداف ووقف الخسارة =====
-        target1 = price * 1.025
-        target2 = price * 1.052
-        target3 = price * 1.08
-        stop_loss = price * 0.98
-
-        # ===== حفظ التنبيه =====
+        last_momentum[sym] = current_move
         last_alert[sym] = now
         alert_counters[sym] = alert_counters.get(sym, 0) + 1
 
-        alerts.append((sym, price, move, volume, rel_vol, momentum_acc, strength, alert_counters[sym], target1, target2, target3, stop_loss))
+        target1 = price * 1.05
+        target2 = price * 1.10
+        target3 = price * 1.15
+        stop_loss = price * 0.95
+
+        if current_move > 3.0 and volume > 500000:
+            strength = "💥 قوية جداً"
+        elif current_move > 2.0 and volume > 200000:
+            strength = "🚀 قوية"
+        else:
+            strength = "📈 متوسطة"
+
+        alerts.append((sym, price, current_move, rel_vol, momentum_acc, alert_counters[sym], target1, target2, target3, stop_loss, strength))
 
     return alerts
 
-# ================= ALERT =================
-async def alert(sym, price, move, volume, rel_vol, momentum_acc, strength, alert_num, t1, t2, t3, sl):
+# ================= TRACKING =================
+async def track_alert(sym, price, move, alert_num):
+    if sym not in alert_history:
+        alert_history[sym] = {
+            "first_alert": ny().timestamp(),
+            "last_price": price,
+            "last_move": move,
+            "alerts": 1
+        }
+    else:
+        alert_history[sym]["alerts"] += 1
+        alert_history[sym]["last_price"] = price
+        alert_history[sym]["last_move"] = move
+
+def get_alert_count(sym):
+    return alert_history.get(sym, {}).get("alerts", 0)
+
+# ================= ALERT FORMAT =================
+async def send_alert(sym, price, move, rel_vol, mom_acc, alert_num, t1, t2, t3, sl, strength):
+    now = ny().strftime("%H:%M:%S")
+    
+    if move > 3.0 and rel_vol > 2.0:
+        move_type = "🚀 انفجار قوي"
+    elif move > 2.0 and rel_vol > 1.5:
+        move_type = "📈 اختراق إيجابي"
+    elif move > 1.5:
+        move_type = "🔍 بداية تحرك"
+    else:
+        move_type = "👀 مراقبة"
+
+    if strength == "💥 قوية جداً":
+        recommendation = "🔥 إشارة قوية جداً"
+    elif strength == "🚀 قوية":
+        recommendation = "📊 إشارة قوية"
+    else:
+        recommendation = "📌 مراقبة"
+
+    await track_alert(sym, price, move, alert_num)
+
     msg = (
-        f"🔥 *M60 Hunter - صيد مباشر (Finnhub)*\n\n"
-        f"📌 *السهم:* `{sym}` | 🔢 *تنبيه:* `#{alert_num}`\n"
-        f"💰 *السعر:* `${price:.2f}`\n"
-        f"📈 *الحركة:* `+{move:.2f}%`\n"
-        f"📊 *الحجم:* `{volume:,}` | *نسبي:* `{rel_vol:.1f}x`\n"
-        f"⚡ *تسارع الزخم:* `{momentum_acc:+.2f}%`\n"
-        f"💪 *القوة:* {strength}\n\n"
-        f"🎯 *الأهداف:*\n"
-        f"1️⃣ `${t1:.2f}` (+2.5%)\n"
-        f"2️⃣ `${t2:.2f}` (+5.2%)\n"
-        f"3️⃣ `${t3:.2f}` (+8.0%)\n\n"
-        f"🛑 *وقف الخسارة:* `${sl:.2f}`\n\n"
-        f"🕒 NY {ny().strftime('%H:%M:%S')} | SA {sa().strftime('%H:%M:%S')}"
+        f"📊 *{sym} — {now}* 📊\n\n"
+        f"🔹 *الرمز:* `{sym}`\n"
+        f"🔹 *نوع الحركة:* `{move_type}`\n"
+        f"🔹 *عدد مرات التنبيه اليوم:* `{alert_num} مرة`\n"
+        f"🔹 *نسبة الارتفاع:* `+{move:.2f}%`\n"
+        f"🔹 *السعر الحالي:* `${price:.2f} دولار`\n"
+        f"🔹 *الحجم النسبي:* `{rel_vol:.1f}x`\n"
+        f"🔹 *التسارع:* `{mom_acc:.1f}x`\n\n"
+        f"🎯 *الأهداف الفنية:*\n"
+        f"  • مقاومة 1: `{t1:.3f}`\n"
+        f"  • مقاومة 2: `{t2:.3f}`\n"
+        f"  • الدعم: `{sl:.3f}`\n\n"
+        f"📌 *توصية:* {recommendation}\n"
+        f"⏰ *وقت التنبيه:* `{now}`"
     )
     await send(msg)
 
@@ -230,7 +265,7 @@ async def main():
 
         for s in signals:
             try:
-                await alert(*s)
+                await send_alert(*s)
                 await asyncio.sleep(random.uniform(0.3, 0.7))
             except Exception as e:
                 logging.error(e)
