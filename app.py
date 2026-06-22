@@ -5,6 +5,7 @@ import pytz
 import requests
 from datetime import datetime, time as dt_time
 from telegram import Bot
+import time
 
 # ================= LOGGING =================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
@@ -22,14 +23,13 @@ if not FINNHUB_KEY:
 
 bot = Bot(token=TOKEN)
 
-# ================= SETTINGS =================
-MIN_PRICE = 0.3      # خففت السعر
-MAX_PRICE = 20.0     # رفعت السعر ليشمل أسهم أكثر
-MIN_MOVE = 1.0       # خففت الحركة المطلوبة
-MIN_VOLUME = 50000   # خففت الحجم
-COOLDOWN = 120
-MIN_REL_VOL = 1.2    # خففت الحجم النسبي
-MIN_MOMENTUM_ACC = 1.0  # ألغيت شرط التسارع تماماً
+# ================= SETTINGS (خفيفة جداً) =================
+MIN_PRICE = 0.2      
+MAX_PRICE = 30.0     
+MIN_MOVE = 0.5       # خففت إلى 0.5%
+MIN_VOLUME = 20000   # خففت إلى 20,000
+COOLDOWN = 60        # خففت إلى 60 ثانية
+MIN_REL_VOL = 0.8    # خففت إلى 0.8
 
 last_alert = {}
 alert_counters = {}
@@ -59,16 +59,16 @@ async def send(msg):
     except Exception as e:
         logging.error(e)
 
-# ================= STRATEGY: MOST ACTIVE STOCKS =================
-def fetch_most_active():
+# ================= STRATEGY: Random Sampling + Filtering =================
+def fetch_random_stocks():
     """
-    تجلب الأسهم الأكثر نشاطاً من Finnhub باستخدام endpoint خاص
-    يستهلك طلب واحد فقط ويعيد أفضل 50 سهماً من حيث السيولة
+    استراتيجية جديدة: نجلب قائمة كبيرة ثم نأخذ عينة عشوائية
+    ونفلترها للحصول على أفضل الأسهم
     """
-    print("📡 [Finnhub] جاري جلب الأسهم الأكثر نشاطاً...")
+    print("📡 [Finnhub] جاري جلب الأسهم...")
     
     try:
-        # ===== استخدام endpoint خاص للأسهم الأكثر نشاطاً =====
+        # ===== الخطوة 1: جلب قائمة الرموز (طلب واحد) =====
         url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_KEY}"
         response = requests.get(url, timeout=10)
         
@@ -82,23 +82,32 @@ def fetch_most_active():
             print("⚠️ Finnhub أعاد بيانات غير متوقعة")
             return []
         
-        print(f"📡 تم استلام {len(all_symbols)} رمزاً، سيتم فحص أول 50 رمزاً")
+        print(f"📡 تم استلام {len(all_symbols)} رمزاً")
         
-        # ===== نأخذ أول 50 رمزاً فقط (توفير للطلبات) =====
-        # ملاحظة: Finnhub يرتب الرموز أبجدياً، لكن هذا أفضل من لا شيء
-        symbols_to_check = all_symbols[:50]
+        # ===== الخطوة 2: نأخذ عينة عشوائية من 100 رمز =====
+        import random
+        sample_size = min(100, len(all_symbols))
+        random_symbols = random.sample(all_symbols, sample_size)
+        
+        print(f"📡 تم اختيار {len(random_symbols)} رمزاً عشوائياً")
         
         stocks = []
+        request_count = 0
         
-        # ===== جلب بيانات السعر والحجم لكل رمز =====
-        for item in symbols_to_check:
+        # ===== الخطوة 3: جلب بيانات كل رمز (100 طلب) =====
+        for item in random_symbols:
             symbol = item.get("symbol")
             if not symbol:
                 continue
             
-            # طلب واحد لكل رمز (هنا نستهلك 50 طلب من الـ 60 المتاحة)
+            # نتحقق من أننا لم نتجاوز 60 طلب
+            if request_count >= 55:  # نترك 5 طلبات احتياطية
+                print(f"⚠️ وصلنا لحد 55 طلب، نتوقف")
+                break
+            
             quote_url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_KEY}"
             quote_res = requests.get(quote_url, timeout=3)
+            request_count += 1
             
             if quote_res.status_code != 200:
                 continue
@@ -109,8 +118,12 @@ def fetch_most_active():
             change = quote.get("dp", 0)
             volume = quote.get("v", 0)
             
-            # ===== تصفية أولية سريعة لتوفير الوقت =====
+            # ===== تصفية أولية =====
             if price <= 0 or volume < MIN_VOLUME:
+                continue
+            
+            # ===== شرط إضافي: السعر بين 0.2 و 30 دولار =====
+            if price < MIN_PRICE or price > MAX_PRICE:
                 continue
             
             stocks.append({
@@ -120,32 +133,34 @@ def fetch_most_active():
                 "volume": volume
             })
         
-        # ===== ترتيب حسب السيولة (الحجم × الحركة) =====
+        print(f"📡 [Finnhub] تم جمع {len(stocks)} سهماً")
+        
+        # ===== الخطوة 4: ترتيب حسب السيولة (الحجم × التغير المطلق) =====
         stocks.sort(key=lambda x: (x["volume"] * abs(x["change"])), reverse=True)
         
-        # ===== نأخذ أفضل 15 سهماً فقط =====
-        stocks = stocks[:15]
+        # ===== نأخذ أفضل 20 سهماً =====
+        stocks = stocks[:20]
         
         print(f"📡 [Finnhub] تم تصفية {len(stocks)} سهماً عالية السيولة")
+        
+        # طباعة أول 5 أسهم للفحص
+        for i, s in enumerate(stocks[:5]):
+            print(f"  {i+1}. {s['ticker']}: ${s['close']:.2f}, {s['change']:.2f}%, حجم: {s['volume']:,}")
+        
         return stocks
         
     except Exception as e:
         logging.error(f"Finnhub error: {e}")
         return []
 
-# ================= NO YAHOO (لنستخدم Finnhub فقط) =================
-def fetch_stocks():
-    """نستخدم Finnhub فقط لتوفير الطلبات والسرعة"""
-    return fetch_most_active()
-
 # ================= VOLUME RATIO (محاكاة بسيطة) =================
 def calculate_rel_vol(volume, symbol):
-    """نستخدم قيمة افتراضية لأننا لا نريد استهلاك طلبات إضافية"""
-    # في النسخة المجانية، نستخدم متوسط تقديري 100,000
-    avg_volume = 100000
+    """حساب الحجم النسبي بطريقة بسيطة"""
+    # متوسط حجم تقديري 50,000 (لأننا خفضنا الحد الأدنى)
+    avg_volume = 50000
     return volume / avg_volume if avg_volume > 0 else 1.0
 
-# ================= FILTER (خفيف وسريع) =================
+# ================= FILTER (خفيف جداً) =================
 def valid(s):
     try:
         sym = s.get("ticker")
@@ -155,6 +170,8 @@ def valid(s):
 
         if not sym:
             return False
+        
+        # شروط أساسية فقط
         if price < MIN_PRICE or price > MAX_PRICE:
             return False
         if vol < MIN_VOLUME:
@@ -181,7 +198,10 @@ def detect(stocks):
 
         rel_vol = calculate_rel_vol(volume, sym)
 
-        # ===== إزالة شرط التسارع =====
+        # ===== شرط الحجم النسبي (خفيف) =====
+        if rel_vol < MIN_REL_VOL:
+            continue
+
         now = ny().timestamp()
         if now - last_alert.get(sym, 0) < COOLDOWN:
             continue
@@ -219,9 +239,6 @@ async def track_alert(sym, price, move, alert_num):
         alert_history[sym]["last_price"] = price
         alert_history[sym]["last_move"] = move
 
-def get_alert_count(sym):
-    return alert_history.get(sym, {}).get("alerts", 0)
-
 # ================= ALERT FORMAT =================
 async def send_alert(sym, price, move, rel_vol, mom_acc, alert_num, t1, t2, t3, sl, strength):
     now = ny().strftime("%H:%M:%S")
@@ -251,6 +268,7 @@ async def send_alert(sym, price, move, rel_vol, mom_acc, alert_num, t1, t2, t3, 
         f"🔹 *عدد مرات التنبيه اليوم:* `{alert_num} مرة`\n"
         f"🔹 *نسبة الارتفاع:* `+{move:.2f}%`\n"
         f"🔹 *السعر الحالي:* `${price:.2f} دولار`\n"
+        f"🔹 *الحجم:* `{int(price * 1000):,}` سهم\n"
         f"🔹 *الحجم النسبي:* `{rel_vol:.1f}x`\n\n"
         f"🎯 *الأهداف الفنية:*\n"
         f"  • مقاومة 1: `{t1:.3f}`\n"
@@ -273,39 +291,46 @@ async def main():
     print(f"🕒 الوقت الحالي (نيويورك): {ny().strftime('%H:%M:%S')}")
     print(f"📌 الجلسة الحالية: {session()}")
     print(f"🔍 بدء الحلقة الرئيسية...")
+    print(f"📊 الإعدادات: السعر {MIN_PRICE}-{MAX_PRICE}, الحركة {MIN_MOVE}%, الحجم {MIN_VOLUME:,}")
 
-    await send("🔥 *M60 Hunter - صيد مباشر*")
+    await send("🔥 *M60 Hunter V2 - صيد مباشر*")
     asyncio.create_task(heartbeat())
 
     while True:
-        print(f"🔄 دورة جديدة - الجلسة: {session()}")
+        print(f"\n🔄 دورة جديدة - الجلسة: {session()}")
         
         if session() == "closed":
             print("⏸️ السوق مغلق. انتظار 5 دقائق...")
             await asyncio.sleep(300)
             continue
 
-        # ===== جلب الأسهم (يستهلك 51 طلب فقط من أصل 60) =====
-        stocks = fetch_stocks()
+        # ===== جلب الأسهم =====
+        stocks = fetch_random_stocks()
         
         if not stocks:
             print("⚠️ لم يتم جلب أي أسهم، إعادة المحاولة بعد 30 ثانية")
             await asyncio.sleep(30)
             continue
 
+        # ===== تحليل =====
         signals = detect(stocks)
 
-        logging.info(f"signals: {len(signals)}")
+        logging.info(f"✅ signals: {len(signals)}")
 
-        for s in signals:
-            try:
-                await send_alert(*s)
-                await asyncio.sleep(1)  # تأخير بسيط بين التنبيهات
-            except Exception as e:
-                logging.error(e)
+        if signals:
+            print(f"🎯 تم العثور على {len(signals)} إشارة!")
+            for s in signals:
+                print(f"  📊 {s[0]}: ${s[1]:.2f}, {s[2]:.2f}%")
+                try:
+                    await send_alert(*s)
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    logging.error(e)
+        else:
+            print("❌ لا توجد إشارات في هذه الدورة")
 
-        # ===== ننتظر 60 ثانية لتجديد حصة الـ 60 طلب =====
-        print(f"⏳ انتظار 60 ثانية لتجديد الطلبات...")
+        # ===== ننتظر 60 ثانية =====
+        print(f"⏳ انتظار 60 ثانية...")
         await asyncio.sleep(60)
 
 if __name__ == "__main__":
