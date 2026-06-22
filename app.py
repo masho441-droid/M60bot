@@ -23,13 +23,18 @@ if not FINNHUB_KEY:
 
 bot = Bot(token=TOKEN)
 
-# ================= SETTINGS (خفيفة جداً) =================
-MIN_PRICE = 0.2      
-MAX_PRICE = 30.0     
-MIN_MOVE = 0.5       # خففت إلى 0.5%
-MIN_VOLUME = 20000   # خففت إلى 20,000
-COOLDOWN = 60        # خففت إلى 60 ثانية
-MIN_REL_VOL = 0.8    # خففت إلى 0.8
+# ================= SETTINGS =================
+MIN_PRICE = 0.5
+MAX_PRICE = 10.0
+MIN_MOVE = 1.0
+MIN_VOLUME = 50000
+COOLDOWN = 120
+MIN_REL_VOL = 1.2
+
+# إعدادات منفصلة للبري ماركت (أخف)
+PREMARKET_MIN_VOLUME = 20000
+PREMARKET_MIN_MOVE = 0.5
+PREMARKET_MIN_REL_VOL = 0.8
 
 last_alert = {}
 alert_counters = {}
@@ -59,16 +64,16 @@ async def send(msg):
     except Exception as e:
         logging.error(e)
 
-# ================= STRATEGY: Random Sampling + Filtering =================
-def fetch_random_stocks():
+# ================= FINNHUB - جلب الأسهم الأكثر زخماً =================
+def fetch_top_momentum_stocks(limit=50, is_premarket=False):
     """
-    استراتيجية جديدة: نجلب قائمة كبيرة ثم نأخذ عينة عشوائية
-    ونفلترها للحصول على أفضل الأسهم
+    يجلب القائمة الكاملة من Finnhub، يرتبها حسب الزخم،
+    ويأخذ أفضل `limit` سهماً
     """
-    print("📡 [Finnhub] جاري جلب الأسهم...")
+    print(f"📡 [Finnhub] جاري جلب الأسهم الأكثر زخماً...")
     
     try:
-        # ===== الخطوة 1: جلب قائمة الرموز (طلب واحد) =====
+        # ===== الخطوة 1: جلب القائمة الكاملة (طلب واحد) =====
         url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_KEY}"
         response = requests.get(url, timeout=10)
         
@@ -84,25 +89,29 @@ def fetch_random_stocks():
         
         print(f"📡 تم استلام {len(all_symbols)} رمزاً")
         
-        # ===== الخطوة 2: نأخذ عينة عشوائية من 100 رمز =====
-        import random
-        sample_size = min(100, len(all_symbols))
-        random_symbols = random.sample(all_symbols, sample_size)
+        # ===== تحديد عدد الرموز التي سنفحصها =====
+        if is_premarket:
+            # في البري: نفحص 60 رمزاً فقط (توفير للطلبات)
+            symbols_to_check = all_symbols[:60]
+        else:
+            # في التداول العادي: نفحص بأقصى طاقة (حتى 1800)
+            symbols_to_check = all_symbols[:1800]
         
-        print(f"📡 تم اختيار {len(random_symbols)} رمزاً عشوائياً")
+        print(f"📡 سيتم فحص {len(symbols_to_check)} رمزاً")
         
         stocks = []
         request_count = 0
+        max_requests = 55 if is_premarket else 55  # نترك 5 طلبات احتياطية
         
-        # ===== الخطوة 3: جلب بيانات كل رمز (100 طلب) =====
-        for item in random_symbols:
+        # ===== الخطوة 2: جلب بيانات كل رمز =====
+        for item in symbols_to_check:
             symbol = item.get("symbol")
             if not symbol:
                 continue
             
-            # نتحقق من أننا لم نتجاوز 60 طلب
-            if request_count >= 55:  # نترك 5 طلبات احتياطية
-                print(f"⚠️ وصلنا لحد 55 طلب، نتوقف")
+            # نتحكم بعدد الطلبات
+            if request_count >= max_requests:
+                print(f"⚠️ وصلنا لحد {max_requests} طلب، نتوقف مؤقتاً")
                 break
             
             quote_url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_KEY}"
@@ -118,13 +127,71 @@ def fetch_random_stocks():
             change = quote.get("dp", 0)
             volume = quote.get("v", 0)
             
-            # ===== تصفية أولية =====
-            if price <= 0 or volume < MIN_VOLUME:
+            # ===== تصفية أولية سريعة =====
+            if price <= 0 or volume <= 0:
                 continue
             
-            # ===== شرط إضافي: السعر بين 0.2 و 30 دولار =====
-            if price < MIN_PRICE or price > MAX_PRICE:
+            # حساب الزخم (نسبة التغير × الحجم)
+            momentum = abs(change) * volume
+            
+            stocks.append({
+                "ticker": symbol,
+                "close": price,
+                "change": change,
+                "volume": volume,
+                "momentum": momentum
+            })
+        
+        print(f"📡 تم جمع {len(stocks)} سهماً")
+        
+        # ===== الخطوة 3: ترتيب حسب الزخم (الأعلى أولاً) =====
+        stocks.sort(key=lambda x: x["momentum"], reverse=True)
+        
+        # ===== الخطوة 4: نأخذ أفضل `limit` سهماً =====
+        top_stocks = stocks[:limit]
+        
+        print(f"📡 [Finnhub] تم اختيار أفضل {len(top_stocks)} سهماً من حيث الزخم")
+        
+        # طباعة للفحص
+        for i, s in enumerate(top_stocks[:5]):
+            print(f"  {i+1}. {s['ticker']}: ${s['close']:.2f}, {s['change']:.2f}%, حجم: {s['volume']:,}, الزخم: {s['momentum']:,}")
+        
+        return top_stocks
+        
+    except Exception as e:
+        logging.error(f"Finnhub error: {e}")
+        return []
+
+# ================= YAHOO (للتداول العادي فقط) =================
+def fetch_yahoo_stocks(symbols):
+    """جلب بيانات Yahoo لرموز محددة"""
+    print(f"📡 [Yahoo] جاري جلب البيانات لـ {len(symbols)} سهماً...")
+    
+    stocks = []
+    
+    for symbol in symbols[:15]:  # نأخذ 15 رمزاً فقط لتوفير الطلبات
+        if not symbol:
+            continue
+            
+        try:
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=5m&range=1d"
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            response = requests.get(url, headers=headers, timeout=5)
+            
+            if response.status_code != 200:
                 continue
+                
+            data = response.json()
+            
+            meta = data.get('chart', {}).get('result', [{}])[0].get('meta', {})
+            price = meta.get('regularMarketPrice', 0)
+            volume = meta.get('regularMarketVolume', 0)
+            
+            if price <= 0 or volume <= 0:
+                continue
+            
+            prev_close = meta.get('regularMarketPreviousClose', price)
+            change = ((price - prev_close) / prev_close) * 100 if prev_close else 0
             
             stocks.append({
                 "ticker": symbol,
@@ -132,36 +199,41 @@ def fetch_random_stocks():
                 "change": change,
                 "volume": volume
             })
-        
-        print(f"📡 [Finnhub] تم جمع {len(stocks)} سهماً")
-        
-        # ===== الخطوة 4: ترتيب حسب السيولة (الحجم × التغير المطلق) =====
-        stocks.sort(key=lambda x: (x["volume"] * abs(x["change"])), reverse=True)
-        
-        # ===== نأخذ أفضل 20 سهماً =====
-        stocks = stocks[:20]
-        
-        print(f"📡 [Finnhub] تم تصفية {len(stocks)} سهماً عالية السيولة")
-        
-        # طباعة أول 5 أسهم للفحص
-        for i, s in enumerate(stocks[:5]):
-            print(f"  {i+1}. {s['ticker']}: ${s['close']:.2f}, {s['change']:.2f}%, حجم: {s['volume']:,}")
-        
-        return stocks
-        
-    except Exception as e:
-        logging.error(f"Finnhub error: {e}")
-        return []
+            
+        except Exception as e:
+            logging.error(f"Yahoo error for {symbol}: {e}")
+            continue
+    
+    print(f"📡 [Yahoo] تم جلب {len(stocks)} سهماً")
+    return stocks
 
-# ================= VOLUME RATIO (محاكاة بسيطة) =================
+# ================= MERGE STOCKS =================
+def merge_stocks(finnhub_stocks, yahoo_stocks):
+    """دمج الأسهم من Finnhub و Yahoo"""
+    all_stocks = finnhub_stocks + yahoo_stocks
+    
+    seen = set()
+    unique_stocks = []
+    for s in all_stocks:
+        ticker = s.get("ticker")
+        if ticker and ticker not in seen:
+            seen.add(ticker)
+            unique_stocks.append(s)
+    
+    # ترتيب حسب الزخم
+    unique_stocks.sort(key=lambda x: (abs(x["change"]) * x["volume"]), reverse=True)
+    
+    print(f"📡 تم دمج {len(unique_stocks)} سهماً فريداً")
+    return unique_stocks
+
+# ================= VOLUME RATIO =================
 def calculate_rel_vol(volume, symbol):
-    """حساب الحجم النسبي بطريقة بسيطة"""
-    # متوسط حجم تقديري 50,000 (لأننا خفضنا الحد الأدنى)
+    """حساب الحجم النسبي (تقديري)"""
     avg_volume = 50000
     return volume / avg_volume if avg_volume > 0 else 1.0
 
-# ================= FILTER (خفيف جداً) =================
-def valid(s):
+# ================= FILTER =================
+def valid(s, is_premarket=False):
     try:
         sym = s.get("ticker")
         price = float(s.get("close") or 0)
@@ -171,24 +243,32 @@ def valid(s):
         if not sym:
             return False
         
-        # شروط أساسية فقط
+        # الفئة السعرية
         if price < MIN_PRICE or price > MAX_PRICE:
             return False
-        if vol < MIN_VOLUME:
-            return False
-        if change < MIN_MOVE:
-            return False
+        
+        # شروط حسب الفترة
+        if is_premarket:
+            if vol < PREMARKET_MIN_VOLUME:
+                return False
+            if change < PREMARKET_MIN_MOVE:
+                return False
+        else:
+            if vol < MIN_VOLUME:
+                return False
+            if change < MIN_MOVE:
+                return False
 
         return True
     except:
         return False
 
 # ================= ENGINE =================
-def detect(stocks):
+def detect(stocks, is_premarket=False):
     alerts = []
 
     for s in stocks:
-        if not valid(s):
+        if not valid(s, is_premarket):
             continue
 
         sym = s.get("ticker")
@@ -198,9 +278,13 @@ def detect(stocks):
 
         rel_vol = calculate_rel_vol(volume, sym)
 
-        # ===== شرط الحجم النسبي (خفيف) =====
-        if rel_vol < MIN_REL_VOL:
-            continue
+        # شرط الحجم النسبي حسب الفترة
+        if is_premarket:
+            if rel_vol < PREMARKET_MIN_REL_VOL:
+                continue
+        else:
+            if rel_vol < MIN_REL_VOL:
+                continue
 
         now = ny().timestamp()
         if now - last_alert.get(sym, 0) < COOLDOWN:
@@ -268,7 +352,6 @@ async def send_alert(sym, price, move, rel_vol, mom_acc, alert_num, t1, t2, t3, 
         f"🔹 *عدد مرات التنبيه اليوم:* `{alert_num} مرة`\n"
         f"🔹 *نسبة الارتفاع:* `+{move:.2f}%`\n"
         f"🔹 *السعر الحالي:* `${price:.2f} دولار`\n"
-        f"🔹 *الحجم:* `{int(price * 1000):,}` سهم\n"
         f"🔹 *الحجم النسبي:* `{rel_vol:.1f}x`\n\n"
         f"🎯 *الأهداف الفنية:*\n"
         f"  • مقاومة 1: `{t1:.3f}`\n"
@@ -290,30 +373,56 @@ async def heartbeat():
 async def main():
     print(f"🕒 الوقت الحالي (نيويورك): {ny().strftime('%H:%M:%S')}")
     print(f"📌 الجلسة الحالية: {session()}")
+    print(f"📊 الفئة السعرية: ${MIN_PRICE} - ${MAX_PRICE}")
     print(f"🔍 بدء الحلقة الرئيسية...")
-    print(f"📊 الإعدادات: السعر {MIN_PRICE}-{MAX_PRICE}, الحركة {MIN_MOVE}%, الحجم {MIN_VOLUME:,}")
 
-    await send("🔥 *M60 Hunter V2 - صيد مباشر*")
+    await send("🔥 *M60 Hunter V4 - صيد الزخم*")
     asyncio.create_task(heartbeat())
 
     while True:
-        print(f"\n🔄 دورة جديدة - الجلسة: {session()}")
+        current_session = session()
+        print(f"\n🔄 دورة جديدة - الجلسة: {current_session}")
         
-        if session() == "closed":
+        if current_session == "closed":
             print("⏸️ السوق مغلق. انتظار 5 دقائق...")
             await asyncio.sleep(300)
             continue
 
-        # ===== جلب الأسهم =====
-        stocks = fetch_random_stocks()
-        
-        if not stocks:
-            print("⚠️ لم يتم جلب أي أسهم، إعادة المحاولة بعد 30 ثانية")
-            await asyncio.sleep(30)
-            continue
-
-        # ===== تحليل =====
-        signals = detect(stocks)
+        # ===== استراتيجية مختلفة حسب الفترة =====
+        if current_session == "premarket":
+            print("🌅 [بري ماركت] وضع التركيز على الزخم - 50 سهماً أفضل")
+            
+            # جلب أفضل 50 سهماً من حيث الزخم من Finnhub
+            top_stocks = fetch_top_momentum_stocks(limit=50, is_premarket=True)
+            
+            if not top_stocks:
+                print("⚠️ لم يتم جلب أي أسهم، إعادة المحاولة بعد 30 ثانية")
+                await asyncio.sleep(30)
+                continue
+            
+            # تطبيق الشروط على أفضل 50
+            signals = detect(top_stocks, is_premarket=True)
+            
+        else:  # regular أو afterhours
+            print("📈 [السوق المفتوح] وضع الاستراتيجية الكاملة - بأقصى طاقة")
+            
+            # جلب أفضل 50 سهماً من Finnhub (حسب الزخم)
+            finnhub_top = fetch_top_momentum_stocks(limit=50, is_premarket=False)
+            
+            if not finnhub_top:
+                print("⚠️ لم يتم جلب أي أسهم من Finnhub")
+                await asyncio.sleep(30)
+                continue
+            
+            # جلب رموز أفضل 15 سهماً لـ Yahoo
+            yahoo_symbols = [s["ticker"] for s in finnhub_top[:15]]
+            yahoo_stocks = fetch_yahoo_stocks(yahoo_symbols)
+            
+            # دمج البيانات
+            stocks = merge_stocks(finnhub_top, yahoo_stocks)
+            
+            # تطبيق الشروط الكاملة
+            signals = detect(stocks, is_premarket=False)
 
         logging.info(f"✅ signals: {len(signals)}")
 
