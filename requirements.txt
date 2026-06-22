@@ -1,4 +1,3 @@
 python-telegram-bot
 pytz
 requests
-tradingview-screener
