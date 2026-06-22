@@ -18,6 +18,9 @@ FINNHUB_KEY = os.getenv("FINNHUB_KEY")
 if not TOKEN or not CHAT_ID:
     raise ValueError("Missing Telegram config")
 
+if not FINNHUB_KEY:
+    logging.warning("FINNHUB_KEY is missing. Bot will work without price confirmation.")
+
 bot = Bot(token=TOKEN)
 
 # ================= SETTINGS =================
@@ -57,51 +60,44 @@ async def send(msg):
     except Exception as e:
         logging.error(e)
 
-# ================= DATA LAYER (الطلب المباشر) =================
-def fetch_screener():
+# ================= DATA LAYER (Finnhub REST API) =================
+def fetch_finnhub_stocks():
     try:
-        url = "https://scanner.tradingview.com/america/scan"
-        payload = {
-            "filter": [
-                {"left": "close", "operation": "in_range", "right": [MIN_PRICE, MAX_PRICE]}
-            ],
-            "columns": ["name", "close", "change", "volume"],
-            "options": {"lang": "en"},
-            "symbols": {"query": {"types": []}, "tickers": []}
-        }
-
-        r = requests.post(url, json=payload, timeout=10)
-        data = r.json()
+        # 1. جلب قائمة الرموز النشطة
+        list_url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_KEY}"
+        list_res = requests.get(list_url, timeout=10)
+        symbols = list_res.json()
 
         stocks = []
-        for item in data.get("data", []):
-            d = item["d"]
-            if len(d) >= 4:
-                stocks.append({
-                    "ticker": d[0],
-                    "close": d[1],
-                    "change": d[2],
-                    "volume": d[3]
-                })
+        for item in symbols[:150]:  # حد أقصى 150 سهم لكل دورة
+            symbol = item.get("symbol")
+            if not symbol:
+                continue
+
+            # 2. جلب سعر السهم الفوري
+            quote_url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_KEY}"
+            quote_res = requests.get(quote_url, timeout=5)
+            quote = quote_res.json()
+
+            price = quote.get("c", 0)
+            change = quote.get("dp", 0)
+            volume = quote.get("v", 0)
+
+            if price <= 0 or volume <= 0:
+                continue
+
+            stocks.append({
+                "ticker": symbol,
+                "close": price,
+                "change": change,
+                "volume": volume
+            })
 
         return stocks
 
     except Exception as e:
-        logging.error(f"Error fetching data: {e}")
+        logging.error(f"Error fetching from Finnhub: {e}")
         return []
-
-# ================= FINNHUB CONFIRMATION =================
-def finnhub_price(symbol):
-    if not FINNHUB_KEY:
-        return None
-
-    try:
-        url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_KEY}"
-        r = requests.get(url, timeout=5)
-        data = r.json()
-        return float(data.get("c")) if data.get("c") else None
-    except:
-        return None
 
 # ================= FILTER =================
 def valid(s):
@@ -150,12 +146,6 @@ def detect(stocks):
         if now - last_alert.get(sym, 0) < COOLDOWN:
             continue
 
-        confirm = finnhub_price(sym)
-        if confirm:
-            diff = abs(confirm - price) / price * 100
-            if diff > 2.5:
-                continue
-
         last_alert[sym] = now
         alert_counters[sym] = alert_counters.get(sym, 0) + 1
 
@@ -166,7 +156,7 @@ def detect(stocks):
 # ================= ALERT =================
 async def alert(sym, price, move, alert_num):
     msg = (
-        f"🔥 *M60 Hunter - صيد مبكر*\n\n"
+        f"🔥 *M60 Hunter - صيد مباشر (Finnhub)*\n\n"
         f"📌 *السهم:* `{sym}` | 🔢 *تنبيه:* `#{alert_num}`\n"
         f"💰 *السعر:* `${price:.2f}`\n"
         f"📈 *الحركة:* `+{move:.2f}%`\n\n"
@@ -183,7 +173,7 @@ async def heartbeat():
 
 # ================= MAIN =================
 async def main():
-    await send("🔥 *M60 Hunter - صيد مبكر متقدم*")
+    await send("🔥 *M60 Hunter - صيد مباشر (Finnhub)*")
     asyncio.create_task(heartbeat())
 
     while True:
@@ -191,7 +181,7 @@ async def main():
             await asyncio.sleep(300)
             continue
 
-        stocks = fetch_screener()
+        stocks = fetch_finnhub_stocks()
         signals = detect(stocks)
 
         logging.info(f"signals: {len(signals)}")
