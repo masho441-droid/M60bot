@@ -6,8 +6,6 @@ import requests
 from datetime import datetime, time as dt_time
 from telegram import Bot
 import time
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 # ================= LOGGING =================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
@@ -24,23 +22,6 @@ if not FINNHUB_KEY:
     logging.warning("FINNHUB_KEY is missing. Bot will work without price confirmation.")
 
 bot = Bot(token=TOKEN)
-
-# ================= SESSION WITH RETRY =================
-def get_session():
-    """جلسة طلبات مع إعادة المحاولة التلقائية"""
-    session = requests.Session()
-    retry = Retry(
-        total=3,
-        backoff_factor=1,
-        status_forcelist=[500, 502, 503, 504]
-    )
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=20)
-    session.mount('http://', adapter)
-    session.mount('https://', adapter)
-    session.timeout = 30
-    return session
-
-session = get_session()
 
 # ================= SETTINGS =================
 MIN_PRICE = 0.5
@@ -66,7 +47,7 @@ def ny():
 def sa():
     return datetime.now(pytz.timezone("Asia/Riyadh"))
 
-def session():
+def get_session():
     t = ny().time()
     if dt_time(4, 0) <= t < dt_time(9, 30):
         return "premarket"
@@ -94,7 +75,7 @@ def fetch_top_momentum_stocks(limit=50, is_premarket=False):
     try:
         # ===== الخطوة 1: جلب القائمة الكاملة (طلب واحد) =====
         url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_KEY}"
-        response = session.get(url, timeout=30)
+        response = requests.get(url, timeout=30)
         
         if response.status_code != 200:
             print(f"⚠️ خطأ في الطلب: {response.status_code}")
@@ -135,7 +116,7 @@ def fetch_top_momentum_stocks(limit=50, is_premarket=False):
             
             try:
                 quote_url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_KEY}"
-                quote_res = session.get(quote_url, timeout=10)  # زيادة المهلة إلى 10 ثوانٍ
+                quote_res = requests.get(quote_url, timeout=10)  # زيادة المهلة إلى 10 ثوانٍ
                 request_count += 1
                 
                 if quote_res.status_code != 200:
@@ -210,7 +191,7 @@ def fetch_yahoo_stocks(symbols):
         try:
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=5m&range=1d"
             headers = {'User-Agent': 'Mozilla/5.0'}
-            response = session.get(url, headers=headers, timeout=10)
+            response = requests.get(url, headers=headers, timeout=10)
             
             if response.status_code != 200:
                 continue
@@ -406,7 +387,7 @@ async def heartbeat():
 # ================= MAIN =================
 async def main():
     print(f"🕒 الوقت الحالي (نيويورك): {ny().strftime('%H:%M:%S')}")
-    print(f"📌 الجلسة الحالية: {session()}")
+    print(f"📌 الجلسة الحالية: {get_session()}")
     print(f"📊 الفئة السعرية: ${MIN_PRICE} - ${MAX_PRICE}")
     print(f"🔍 بدء الحلقة الرئيسية...")
 
@@ -414,7 +395,7 @@ async def main():
     asyncio.create_task(heartbeat())
 
     while True:
-        current_session = session()
+        current_session = get_session()
         print(f"\n🔄 دورة جديدة - الجلسة: {current_session}")
         
         if current_session == "closed":
