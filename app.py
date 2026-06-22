@@ -72,7 +72,7 @@ def fetch_finnhub_stocks():
         symbols = list_res.json()
 
         stocks = []
-        for item in symbols[:150]:
+        for item in symbols:  # إزالة [:150]
             symbol = item.get("symbol")
             if not symbol:
                 continue
@@ -103,12 +103,10 @@ def fetch_finnhub_stocks():
 
 def fetch_yahoo_stocks():
     try:
-        # جلب قائمة عشوائية من الأسهم من Finnhub للحصول على رموز Yahoo
         list_url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_KEY}"
         list_res = requests.get(list_url, timeout=10)
         symbols = list_res.json()
         
-        # أخذ 20 رمزاً عشوائياً لتجنب القائمة الثابتة
         yahoo_symbols = [item.get("symbol") for item in symbols[:20] if item.get("symbol")]
         
         stocks = []
