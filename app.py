@@ -71,7 +71,19 @@ def fetch_finnhub_stocks():
         list_url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_KEY}"
         list_res = requests.get(list_url, timeout=10)
         symbols = list_res.json()
+        
+        if isinstance(symbols, str):
+            print(f"⚠️ Finnhub أعاد نصاً: {symbols[:100]}")
+            return []
+        if not isinstance(symbols, list):
+            print(f"⚠️ Finnhub أعاد نوعاً غير متوقع: {type(symbols)}")
+            return []
+
         print(f"📡 [Finnhub] تم استلام {len(symbols)} رمزاً")
+        
+        # ===== أخذ أول 200 رمز فقط =====
+        symbols = symbols[:200]
+        print(f"📡 [Finnhub] سيتم فحص {len(symbols)} رمزاً")
 
         stocks = []
         for item in symbols:
@@ -107,9 +119,14 @@ def fetch_finnhub_stocks():
 def fetch_yahoo_stocks():
     print("📡 [Yahoo] جاري جلب الأسهم...")
     try:
+        # جلب 20 رمزاً من Finnhub (أول 20 رمزاً) للاستعلام عنهم في Yahoo
         list_url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_KEY}"
         list_res = requests.get(list_url, timeout=10)
         symbols = list_res.json()
+        
+        if not isinstance(symbols, list):
+            print("⚠️ Finnhub لم يعد قائمة صالحة لـ Yahoo")
+            return []
         
         yahoo_symbols = [item.get("symbol") for item in symbols[:20] if item.get("symbol")]
         
