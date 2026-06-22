@@ -66,13 +66,15 @@ async def send(msg):
 
 # ================= DATA LAYER (Finnhub + Yahoo) =================
 def fetch_finnhub_stocks():
+    print("📡 [Finnhub] جاري جلب الأسهم...")
     try:
         list_url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_KEY}"
         list_res = requests.get(list_url, timeout=10)
         symbols = list_res.json()
+        print(f"📡 [Finnhub] تم استلام {len(symbols)} رمزاً")
 
         stocks = []
-        for item in symbols:  # إزالة [:150]
+        for item in symbols:
             symbol = item.get("symbol")
             if not symbol:
                 continue
@@ -95,6 +97,7 @@ def fetch_finnhub_stocks():
                 "volume": volume
             })
 
+        print(f"📡 [Finnhub] تم تصفية {len(stocks)} سهماً")
         return stocks
 
     except Exception as e:
@@ -102,6 +105,7 @@ def fetch_finnhub_stocks():
         return []
 
 def fetch_yahoo_stocks():
+    print("📡 [Yahoo] جاري جلب الأسهم...")
     try:
         list_url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_KEY}"
         list_res = requests.get(list_url, timeout=10)
@@ -136,6 +140,7 @@ def fetch_yahoo_stocks():
                 "volume": volume
             })
         
+        print(f"📡 [Yahoo] تم جلب {len(stocks)} سهماً")
         return stocks
     except Exception as e:
         logging.error(f"Yahoo error: {e}")
@@ -157,6 +162,7 @@ def merge_and_sort_stocks(finnhub_stocks, yahoo_stocks):
         reverse=True
     )
     
+    print(f"📡 تم دمج وترتيب {len(unique_stocks)} سهماً")
     return unique_stocks
 
 # ================= VOLUME RATIO =================
@@ -306,14 +312,22 @@ async def heartbeat():
 
 # ================= MAIN =================
 async def main():
+    print(f"🕒 الوقت الحالي (نيويورك): {ny().strftime('%H:%M:%S')}")
+    print(f"📌 الجلسة الحالية: {session()}")
+    print(f"🔍 بدء الحلقة الرئيسية...")
+
     await send("🔥 *M60 Hunter - صيد مباشر (Finnhub)*")
     asyncio.create_task(heartbeat())
 
     while True:
+        print(f"🔄 دورة جديدة - الجلسة: {session()}")
+        
         if session() == "closed":
+            print("⏸️ السوق مغلق. انتظار 5 دقائق...")
             await asyncio.sleep(300)
             continue
 
+        print("📡 جاري جلب الأسهم...")
         finnhub_stocks = fetch_finnhub_stocks()
         yahoo_stocks = fetch_yahoo_stocks()
         stocks = merge_and_sort_stocks(finnhub_stocks, yahoo_stocks)
