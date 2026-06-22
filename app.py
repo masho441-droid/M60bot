@@ -64,7 +64,7 @@ async def send(msg):
     except Exception as e:
         logging.error(e)
 
-# ================= DATA LAYER (Finnhub) =================
+# ================= DATA LAYER (Finnhub + Yahoo) =================
 def fetch_finnhub_stocks():
     try:
         list_url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_KEY}"
@@ -72,7 +72,7 @@ def fetch_finnhub_stocks():
         symbols = list_res.json()
 
         stocks = []
-        for item in symbols[:30]:
+        for item in symbols[:150]:
             symbol = item.get("symbol")
             if not symbol:
                 continue
@@ -98,15 +98,73 @@ def fetch_finnhub_stocks():
         return stocks
 
     except Exception as e:
-        logging.error(f"Error fetching from Finnhub: {e}")
+        logging.error(f"Finnhub error: {e}")
         return []
+
+def fetch_yahoo_stocks():
+    try:
+        # جلب قائمة عشوائية من الأسهم من Finnhub للحصول على رموز Yahoo
+        list_url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_KEY}"
+        list_res = requests.get(list_url, timeout=10)
+        symbols = list_res.json()
+        
+        # أخذ 20 رمزاً عشوائياً لتجنب القائمة الثابتة
+        yahoo_symbols = [item.get("symbol") for item in symbols[:20] if item.get("symbol")]
+        
+        stocks = []
+        for symbol in yahoo_symbols:
+            if not symbol:
+                continue
+                
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=5m&range=1d"
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            response = requests.get(url, headers=headers, timeout=5)
+            data = response.json()
+            
+            meta = data.get('chart', {}).get('result', [{}])[0].get('meta', {})
+            price = meta.get('regularMarketPrice', 0)
+            volume = meta.get('regularMarketVolume', 0)
+            
+            if price <= 0 or volume <= 0:
+                continue
+            
+            prev_close = meta.get('regularMarketPreviousClose', price)
+            change = ((price - prev_close) / prev_close) * 100 if prev_close else 0
+            
+            stocks.append({
+                "ticker": symbol,
+                "close": price,
+                "change": change,
+                "volume": volume
+            })
+        
+        return stocks
+    except Exception as e:
+        logging.error(f"Yahoo error: {e}")
+        return []
+
+def merge_and_sort_stocks(finnhub_stocks, yahoo_stocks):
+    all_stocks = finnhub_stocks + yahoo_stocks
+    
+    seen = set()
+    unique_stocks = []
+    for s in all_stocks:
+        ticker = s.get("ticker")
+        if ticker and ticker not in seen:
+            seen.add(ticker)
+            unique_stocks.append(s)
+    
+    unique_stocks.sort(
+        key=lambda x: (x.get("volume", 0) * abs(x.get("change", 0))),
+        reverse=True
+    )
+    
+    return unique_stocks
 
 # ================= VOLUME RATIO =================
 def get_avg_volume(symbol):
     try:
-        # محاولة جلب متوسط الحجم من Finnhub
         url = f"https://finnhub.io/api/v1/stock/earnings?symbol={symbol}&token={FINNHUB_KEY}"
-        # للتبسيط نستخدم قيمة ثابتة، يمكن تحسينها لاحقاً
         return 100000
     except:
         return 100000
@@ -258,7 +316,10 @@ async def main():
             await asyncio.sleep(300)
             continue
 
-        stocks = fetch_finnhub_stocks()
+        finnhub_stocks = fetch_finnhub_stocks()
+        yahoo_stocks = fetch_yahoo_stocks()
+        stocks = merge_and_sort_stocks(finnhub_stocks, yahoo_stocks)
+
         signals = detect(stocks)
 
         logging.info(f"signals: {len(signals)}")
@@ -270,7 +331,7 @@ async def main():
             except Exception as e:
                 logging.error(e)
 
-        await asyncio.sleep(15)
+        await asyncio.sleep(12)
 
 if __name__ == "__main__":
     asyncio.run(main())
