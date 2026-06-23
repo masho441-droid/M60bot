@@ -8,8 +8,8 @@ from telegram import Bot
 import time
 from flask import Flask
 from threading import Thread
-import numpy as np
-from tvkit import TVClient  # TradingView Client
+import traceback
+from tvkit import TVClient
 
 # ================= FAKE WEB SERVER (for Render) =================
 web_app = Flask('')
@@ -30,7 +30,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
 # ================= ENV =================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-FINNHUB_KEY = os.getenv("FINNHUB_KEY")  # للاستخدام الاحتياطي فقط
+FINNHUB_KEY = os.getenv("FINNHUB_KEY")
 
 if not TOKEN or not CHAT_ID:
     raise ValueError("Missing Telegram config")
@@ -44,6 +44,8 @@ MIN_MOVE = 1.0
 MIN_VOLUME = 50000
 COOLDOWN = 120
 MIN_REL_VOL = 1.2
+MIN_MARKET_CAP = 10_000_000   # 10 مليون
+MAX_MARKET_CAP = 150_000_000  # 150 مليون
 
 # إعدادات منفصلة للبري ماركت والآفتر ماركت (أخف)
 PREMARKET_MIN_VOLUME = 20000
@@ -53,6 +55,8 @@ PREMARKET_MIN_REL_VOL = 0.8
 last_alert = {}
 alert_counters = {}
 alert_history = {}
+symbols_cache = None
+last_cache_update = 0
 
 # ================= TIME =================
 def ny():
@@ -75,84 +79,109 @@ async def send(msg):
     except Exception as e:
         logging.error(e)
 
-# ================= TRADINGVIEW (المصدر الرئيسي) =================
-def fetch_tradingview_stocks():
-    """جلب الأسهم من TradingView باستخدام tvkit"""
-    print("📡 [TradingView] جاري جلب الأسهم...")
+# ================= GET SYMBOLS LIST (Finnhub - CACHED) =================
+def get_symbols():
+    """تجلب قائمة الرموز من Finnhub وتخزنها مؤقتاً لمدة ساعة"""
+    global symbols_cache, last_cache_update
     
-    # قائمة تجريبية من الأسهم المعروفة
-    test_symbols = ["AAPL", "TSLA", "NVDA", "AMD", "AMZN", "MSFT", "GOOGL", "META", "NFLX", "INTC"]
+    now = time.time()
+    if symbols_cache and (now - last_cache_update) < 3600:  # ساعة واحدة
+        return symbols_cache
     
-    stocks = []
-    
+    try:
+        url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_KEY}"
+        response = requests.get(url, timeout=30)
+        
+        if response.status_code != 200:
+            logging.error(f"خطأ في جلب القائمة: {response.status_code}")
+            return symbols_cache or []
+            
+        data = response.json()
+        if isinstance(data, list):
+            symbols_cache = data
+            last_cache_update = now
+            logging.info(f"✅ تم تحديث قائمة الرموز: {len(symbols_cache)} رمزاً")
+            return symbols_cache
+        else:
+            logging.error("بيانات غير متوقعة من Finnhub")
+            return []
+            
+    except Exception as e:
+        logging.error(f"خطأ في جلب القائمة: {e}")
+        return symbols_cache or []
+
+# ================= CHECK MARKET CAP (Finnhub) =================
+def get_market_cap(symbol):
+    """تجلب القيمة السوقية للسهم من Finnhub"""
+    try:
+        url = f"https://finnhub.io/api/v1/stock/profile2?symbol={symbol}&token={FINNHUB_KEY}"
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code == 429:
+            logging.warning(f"⚠️ [Profile] رمز {symbol} أعاد كود 429 (تجاوز الحد)")
+            return None
+            
+        if response.status_code != 200:
+            return None
+            
+        data = response.json()
+        market_cap = data.get("marketCapitalization")
+        
+        if market_cap:
+            return float(market_cap) * 1_000_000  # تحويل إلى دولار
+        return None
+        
+    except Exception as e:
+        return None
+
+# ================= GET QUOTE (TradingView) =================
+def get_tradingview_quote(symbol):
+    """تجلب بيانات السعر والحجم من TradingView"""
     try:
         # إنشاء عميل TradingView
         client = TVClient()
+        data = client.get_quote(symbol)
         
-        for symbol in test_symbols:
-            try:
-                print(f"📡 [TradingView] جاري جلب {symbol}...")
-                
-                # جلب البيانات من TradingView
-                # ملاحظة: tvkit يستخدم صيغة مختلفة للرموز، نضيف "NASDAQ:" أو "NYSE:" حسب الحاجة
-                # للتجربة، نستخدم الصيغة المبسطة
-                data = client.get_quote(symbol)
-                
-                if not data:
-                    print(f"⚠️ {symbol}: لا توجد بيانات")
-                    continue
-                
-                # استخراج البيانات
-                price = data.get('close', 0)
-                volume = data.get('volume', 0)
-                change = data.get('change', 0)
-                
-                if price <= 0 or volume <= 0:
-                    print(f"⚠️ {symbol}: سعر أو حجم غير صحيح (price={price}, volume={volume})")
-                    continue
-                
-                stocks.append({
-                    "ticker": symbol,
-                    "close": price,
-                    "change": change,
-                    "volume": volume
-                })
-                print(f"✅ {symbol}: ${price:.2f}, {change:.2f}%, حجم: {volume:,}")
-                
-            except Exception as e:
-                print(f"⚠️ {symbol}: خطأ: {type(e).__name__}: {e}")
-                continue
+        if not data:
+            return None
+            
+        price = data.get('close', 0)
+        change = data.get('change', 0)
+        volume = data.get('volume', 0)
         
-        print(f"📡 [TradingView] تم جلب {len(stocks)} سهماً")
-        return stocks
+        if price <= 0 or volume <= 0:
+            return None
+            
+        return {
+            "ticker": symbol,
+            "close": price,
+            "change": change,
+            "volume": volume
+        }
         
     except Exception as e:
-        print(f"⚠️ [TradingView] خطأ في الاتصال: {e}")
-        # في حال فشل TradingView، نستخدم Yahoo كنسخة احتياطية
-        print("📡 [TradingView] فشل الاتصال، استخدام Yahoo كنسخة احتياطية...")
-        return fetch_yahoo_fallback()
+        logging.warning(f"⚠️ [TradingView] خطأ في {symbol}: {e}")
+        return None
 
-def fetch_yahoo_fallback():
-    """نسخة احتياطية باستخدام Yahoo"""
-    print("📡 [Yahoo - Fallback] جاري جلب الأسهم...")
-    
-    test_symbols = ["AAPL", "TSLA", "NVDA", "AMD", "AMZN", "MSFT", "GOOGL", "META", "NFLX", "INTC"]
+# ================= YAHOO (نسخة احتياطية للتحقق) =================
+def fetch_yahoo_stocks(symbols):
+    """جلب بيانات Yahoo لرموز محددة (نسخة احتياطية)"""
+    if not symbols:
+        return []
     
     stocks = []
-    for symbol in test_symbols:
+    for symbol in symbols[:10]:
         try:
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=5m&range=1d"
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-            response = requests.get(url, headers=headers, timeout=30)
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            response = requests.get(url, headers=headers, timeout=10)
             
             if response.status_code != 200:
                 continue
                 
             data = response.json()
-            if not data.get('chart', {}).get('result'):
-                continue
-                
-            meta = data['chart']['result'][0].get('meta', {})
+            meta = data.get('chart', {}).get('result', [{}])[0].get('meta', {})
+            
             price = meta.get('regularMarketPrice', 0)
             volume = meta.get('regularMarketVolume', 0)
             
@@ -168,12 +197,10 @@ def fetch_yahoo_fallback():
                 "change": change,
                 "volume": volume
             })
-            print(f"✅ {symbol}: ${price:.2f}, {change:.2f}%, حجم: {volume:,}")
             
         except Exception as e:
             continue
     
-    print(f"📡 [Yahoo - Fallback] تم جلب {len(stocks)} سهماً")
     return stocks
 
 # ================= VOLUME RATIO =================
@@ -278,25 +305,90 @@ async def main():
     print(f"🕒 الوقت: {ny().strftime('%H:%M:%S')}")
     print(f"📌 الجلسة: {get_session()}")
     print(f"💰 الفئة السعرية: ${MIN_PRICE} - ${MAX_PRICE}")
-    print(f"🔍 المصدر: TradingView (مع Yahoo كنسخة احتياطية)")
+    print(f"📊 القيمة السوقية: ${MIN_MARKET_CAP/1_000_000:.0f}M - ${MAX_MARKET_CAP/1_000_000:.0f}M")
+    print(f"🔍 المصدر: TradingView (مع Finnhub للقائمة والقيمة السوقية)")
 
-    await send("📊 *M60 Hunter - TradingView*")
+    await send("📊 *M60 Hunter - TradingView (بدون قوائم ثابتة)*")
 
     while True:
         current_session = get_session()
         print(f"\n🔄 دورة جديدة - {current_session}")
         
-        # ===== جلب الأسهم من TradingView =====
-        stocks = fetch_tradingview_stocks()
+        # ===== جلب القائمة الأولية من Finnhub =====
+        all_symbols = get_symbols()
+        if not all_symbols:
+            print("⚠️ لا توجد رموز، إعادة المحاولة...")
+            await asyncio.sleep(30)
+            continue
+
+        # ===== نأخذ أول 200 سهم فقط لتجنب تجاوز حد الطلبات =====
+        symbols_to_check = all_symbols[:200]
+        print(f"📡 جاري تدقيق {len(symbols_to_check)} رمزاً (من أصل {len(all_symbols)})...")
         
-        if not stocks:
-            print("⚠️ لم يتم جلب أي أسهم، إعادة المحاولة...")
+        # ===== تصفية حسب القيمة السوقية =====
+        filtered_stocks = []
+        checked = 0
+        
+        try:
+            for item in symbols_to_check:
+                symbol = item.get("symbol")
+                if not symbol:
+                    continue
+                
+                try:
+                    # انتظر ثانية قبل كل طلب (تجنب 429)
+                    await asyncio.sleep(1)
+                    
+                    # نتحقق من القيمة السوقية
+                    market_cap = get_market_cap(symbol)
+                    checked += 1
+                    
+                    if market_cap and MIN_MARKET_CAP <= market_cap <= MAX_MARKET_CAP:
+                        # نأخذ بيانات السعر من TradingView
+                        quote = get_tradingview_quote(symbol)
+                        if quote:
+                            quote["market_cap"] = market_cap
+                            filtered_stocks.append(quote)
+                            print(f"✅ {symbol}: ${quote['close']:.2f}, {quote['change']:.2f}%, حجم: {quote['volume']:,}, قيمة: ${market_cap/1_000_000:.1f}M")
+                    
+                except Exception as e:
+                    logging.error(f"⚠️ خطأ في {symbol}: {e}")
+                    continue
+                    
+        except Exception as e:
+            logging.error(f"⚠️ خطأ جسيم في الحلقة: {e}")
             await asyncio.sleep(30)
             continue
         
+        print(f"📡 تم العثور على {len(filtered_stocks)} سهماً ضمن الفئة المستهدفة")
+        
+        if not filtered_stocks:
+            print("⏳ لا توجد أسهم مطابقة، ننتظر 30 ثانية...")
+            await asyncio.sleep(30)
+            continue
+        
+        # ===== ترتيب حسب النشاط والزخم =====
+        filtered_stocks.sort(key=lambda x: (x["volume"] * x["close"]), reverse=True)
+        top_100 = filtered_stocks[:100]
+        
+        top_100.sort(key=lambda x: (abs(x["change"]) * x["volume"]), reverse=True)
+        top_40 = top_100[:40]
+        
+        # ===== إضافة Yahoo للتحقق في التداول العادي =====
+        if current_session == "regular":
+            yahoo_symbols = [s["ticker"] for s in top_40[:10]]
+            yahoo_stocks = fetch_yahoo_stocks(yahoo_symbols)
+            for y in yahoo_stocks:
+                for f in top_40:
+                    if f["ticker"] == y["ticker"]:
+                        f["close"] = y["close"]
+                        f["change"] = y["change"]
+                        f["volume"] = y["volume"]
+                        break
+        
         # ===== تطبيق الشروط =====
         is_premarket = (current_session == "premarket" or current_session == "afterhours")
-        signals = detect(stocks, is_premarket)
+        signals = detect(top_40, is_premarket)
         
         print(f"✅ signals: {len(signals)}")
         
