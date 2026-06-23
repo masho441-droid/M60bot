@@ -2,4 +2,4 @@ requests
 pytz
 python-telegram-bot
 flask
-numpy
+yfinance
