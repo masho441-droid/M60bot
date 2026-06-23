@@ -8,7 +8,6 @@ from telegram import Bot
 import time
 from flask import Flask
 from threading import Thread
-import traceback
 
 # ================= FAKE WEB SERVER (for Render) =================
 web_app = Flask('')
@@ -43,8 +42,8 @@ MIN_MOVE = 1.0
 MIN_VOLUME = 50000
 COOLDOWN = 120
 MIN_REL_VOL = 1.2
-MIN_MARKET_CAP = 10_000_000   # 10 مليون
-MAX_MARKET_CAP = 150_000_000  # 150 مليون
+MIN_MARKET_CAP = 10_000_000
+MAX_MARKET_CAP = 150_000_000
 
 PREMARKET_MIN_VOLUME = 20000
 PREMARKET_MIN_MOVE = 0.5
@@ -100,37 +99,31 @@ def get_symbols():
         logging.error(f"خطأ في جلب القائمة: {e}")
         return symbols_cache or []
 
-# ================= GET MARKET CAP + QUOTE (طلب واحد) =================
+# ================= GET STOCK DATA (طلب واحد) =================
 def get_stock_data(symbol):
     """تجلب القيمة السوقية والسعر والحجم في طلب واحد"""
     try:
-        # استخدام profile2 للحصول على القيمة السوقية
+        # الحصول على القيمة السوقية
         url = f"https://finnhub.io/api/v1/stock/profile2?symbol={symbol}&token={FINNHUB_KEY}"
         response = requests.get(url, timeout=10)
         
         if response.status_code == 429:
-            logging.warning(f"⚠️ [Finnhub] رمز {symbol} أعاد كود 429 (تجاوز الحد)")
             return None
-            
         if response.status_code != 200:
             return None
             
         data = response.json()
         market_cap = data.get("marketCapitalization")
-        
         if not market_cap:
             return None
-            
         market_cap = float(market_cap) * 1_000_000
         
-        # جلب السعر والحجم من quote
+        # الحصول على السعر والحجم
         quote_url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_KEY}"
         quote_res = requests.get(quote_url, timeout=10)
         
         if quote_res.status_code == 429:
-            logging.warning(f"⚠️ [Finnhub] رمز {symbol} أعاد كود 429 (تجاوز الحد)")
             return None
-            
         if quote_res.status_code != 200:
             return None
             
@@ -256,15 +249,14 @@ async def main():
     print(f"📌 الجلسة: {get_session()}")
     print(f"💰 الفئة السعرية: ${MIN_PRICE} - ${MAX_PRICE}")
     print(f"📊 القيمة السوقية: ${MIN_MARKET_CAP/1_000_000:.0f}M - ${MAX_MARKET_CAP/1_000_000:.0f}M")
-    print(f"🔍 المصدر: Finnhub (مع إدارة ذكية للطلبات)")
 
-    await send("📊 *M60 Hunter V11 - Finnhub (محسن)*")
+    await send("📊 *M60 Hunter V12 - Finnhub (ديناميكي)*")
 
     while True:
         current_session = get_session()
         print(f"\n🔄 دورة جديدة - {current_session}")
         
-        # ===== جلب القائمة =====
+        # ===== جلب القائمة الكاملة =====
         all_symbols = get_symbols()
         if not all_symbols:
             print("⚠️ لا توجد رموز، إعادة المحاولة...")
@@ -273,7 +265,7 @@ async def main():
 
         # ===== نأخذ 100 سهم فقط لكل دورة =====
         symbols_to_check = all_symbols[:100]
-        print(f"📡 جاري تدقيق {len(symbols_to_check)} رمزاً...")
+        print(f"📡 جاري تدقيق {len(symbols_to_check)} رمزاً (من أصل {len(all_symbols)})...")
         
         filtered_stocks = []
         request_count = 0
