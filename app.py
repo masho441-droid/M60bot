@@ -43,8 +43,6 @@ MIN_MOVE = 1.0
 MIN_VOLUME = 50000
 COOLDOWN = 120
 MIN_REL_VOL = 1.2
-MIN_MARKET_CAP = 10_000_000   # 10 مليون
-MAX_MARKET_CAP = 150_000_000  # 150 مليون
 
 # إعدادات منفصلة للبري ماركت والآفتر ماركت (أخف)
 PREMARKET_MIN_VOLUME = 20000
@@ -54,8 +52,6 @@ PREMARKET_MIN_REL_VOL = 0.8
 last_alert = {}
 alert_counters = {}
 alert_history = {}
-symbols_cache = None
-last_cache_update = 0
 
 # ================= TIME =================
 def ny():
@@ -78,111 +74,23 @@ async def send(msg):
     except Exception as e:
         logging.error(e)
 
-# ================= GET SYMBOLS LIST (CACHED) =================
-def get_symbols():
-    """تجلب قائمة الرموز من Finnhub وتخزنها مؤقتاً لمدة ساعة"""
-    global symbols_cache, last_cache_update
+# ================= YAHOO (المصدر الوحيد الآن) =================
+def fetch_yahoo_stocks():
+    """جلب الأسهم من Yahoo فقط (للتجربة)"""
+    print("📡 [Yahoo] جاري جلب الأسهم...")
     
-    now = time.time()
-    if symbols_cache and (now - last_cache_update) < 3600:  # ساعة واحدة
-        return symbols_cache
-    
-    try:
-        url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_KEY}"
-        response = requests.get(url, timeout=30)
-        
-        if response.status_code != 200:
-            logging.error(f"خطأ في جلب القائمة: {response.status_code}")
-            return symbols_cache or []
-            
-        data = response.json()
-        if isinstance(data, list):
-            symbols_cache = data
-            last_cache_update = now
-            logging.info(f"✅ تم تحديث قائمة الرموز: {len(symbols_cache)} رمزاً")
-            return symbols_cache
-        else:
-            logging.error("بيانات غير متوقعة من Finnhub")
-            return []
-            
-    except Exception as e:
-        logging.error(f"خطأ في جلب القائمة: {e}")
-        return symbols_cache or []
-
-# ================= CHECK MARKET CAP (مع طباعة الأخطاء) =================
-def get_market_cap(symbol):
-    """تجلب القيمة السوقية للسهم من Finnhub"""
-    try:
-        url = f"https://finnhub.io/api/v1/stock/profile2?symbol={symbol}&token={FINNHUB_KEY}"
-        response = requests.get(url, timeout=10)
-        
-        if response.status_code == 429:
-            logging.warning(f"⚠️ [Profile] رمز {symbol} أعاد كود 429 (تجاوز الحد)")
-            return None
-            
-        if response.status_code != 200:
-            logging.warning(f"⚠️ [Profile] رمز {symbol} أعاد كود {response.status_code}")
-            return None
-            
-        data = response.json()
-        market_cap = data.get("marketCapitalization")
-        
-        if market_cap:
-            return float(market_cap) * 1_000_000  # تحويل إلى دولار
-        return None
-        
-    except Exception as e:
-        logging.warning(f"⚠️ [Profile] خطأ في {symbol}: {e}")
-        return None
-
-# ================= GET QUOTE (مع طباعة الأخطاء) =================
-def get_quote(symbol):
-    """تجلب بيانات السعر والحجم من Finnhub"""
-    try:
-        url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_KEY}"
-        response = requests.get(url, timeout=10)
-        
-        if response.status_code == 429:
-            logging.warning(f"⚠️ [Quote] رمز {symbol} أعاد كود 429 (تجاوز الحد)")
-            return None
-            
-        if response.status_code != 200:
-            logging.warning(f"⚠️ [Quote] رمز {symbol} أعاد كود {response.status_code}")
-            return None
-            
-        data = response.json()
-        price = data.get("c", 0)
-        change = data.get("dp", 0)
-        volume = data.get("v", 0)
-        
-        if price <= 0 or volume <= 0:
-            return None
-            
-        return {
-            "ticker": symbol,
-            "close": price,
-            "change": change,
-            "volume": volume
-        }
-        
-    except Exception as e:
-        logging.warning(f"⚠️ [Quote] خطأ في {symbol}: {e}")
-        return None
-
-# ================= YAHOO (للتداول العادي فقط) =================
-def fetch_yahoo_stocks(symbols):
-    """جلب بيانات Yahoo لرموز محددة (للتداول العادي)"""
-    if not symbols:
-        return []
+    # قائمة تجريبية من الأسهم المعروفة (للتجربة)
+    test_symbols = ["AAPL", "TSLA", "NVDA", "AMD", "AMZN", "MSFT", "GOOGL", "META", "NFLX", "INTC"]
     
     stocks = []
-    for symbol in symbols[:10]:  # نأخذ 10 رموز فقط
+    for symbol in test_symbols:
         try:
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=5m&range=1d"
             headers = {'User-Agent': 'Mozilla/5.0'}
             response = requests.get(url, headers=headers, timeout=10)
             
             if response.status_code != 200:
+                print(f"⚠️ Yahoo خطأ في {symbol}: كود {response.status_code}")
                 continue
                 
             data = response.json()
@@ -192,6 +100,7 @@ def fetch_yahoo_stocks(symbols):
             volume = meta.get('regularMarketVolume', 0)
             
             if price <= 0 or volume <= 0:
+                print(f"⚠️ {symbol}: سعر أو حجم غير صحيح")
                 continue
             
             prev_close = meta.get('regularMarketPreviousClose', price)
@@ -203,10 +112,13 @@ def fetch_yahoo_stocks(symbols):
                 "change": change,
                 "volume": volume
             })
+            print(f"✅ {symbol}: ${price:.2f}, {change:.2f}%, حجم: {volume:,}")
             
         except Exception as e:
+            print(f"⚠️ Yahoo خطأ في {symbol}: {e}")
             continue
     
+    print(f"📡 [Yahoo] تم جلب {len(stocks)} سهماً")
     return stocks
 
 # ================= VOLUME RATIO =================
@@ -311,100 +223,25 @@ async def main():
     print(f"🕒 الوقت: {ny().strftime('%H:%M:%S')}")
     print(f"📌 الجلسة: {get_session()}")
     print(f"💰 الفئة السعرية: ${MIN_PRICE} - ${MAX_PRICE}")
-    print(f"📊 القيمة السوقية: ${MIN_MARKET_CAP/1_000_000:.0f}M - ${MAX_MARKET_CAP/1_000_000:.0f}M")
+    print(f"🔍 وضع الاختبار: يعمل على Yahoo فقط")
 
-    await send("🔥 *M60 Hunter V6 - الصيد الذكي*")
+    await send("🧪 *M60 Hunter - وضع الاختبار (Yahoo فقط)*")
 
     while True:
         current_session = get_session()
         print(f"\n🔄 دورة جديدة - {current_session}")
         
-        # ===== تم تعطيل شرط إغلاق السوق للتجربة =====
-        # if current_session == "closed":
-        #     print("⏸️ السوق مغلق. انتظار 5 دقائق...")
-        #     await asyncio.sleep(300)
-        #     continue
-
-        # ===== جلب القائمة الكاملة (مع تقليل عدد الأسهم) =====
-        all_symbols = get_symbols()
-        if not all_symbols:
-            print("⚠️ لا توجد رموز، إعادة المحاولة...")
+        # ===== جلب الأسهم من Yahoo فقط =====
+        stocks = fetch_yahoo_stocks()
+        
+        if not stocks:
+            print("⚠️ لم يتم جلب أي أسهم، إعادة المحاولة...")
             await asyncio.sleep(30)
             continue
-
-        # ===== نأخذ أول 300 سهم فقط لتجنب تجاوز حد الطلبات =====
-        symbols_to_check = all_symbols[:300]
-        print(f"📡 جاري تدقيق {len(symbols_to_check)} رمزاً (من أصل {len(all_symbols)})...")
-        
-        # ===== تصفية حسب القيمة السوقية =====
-        filtered_stocks = []
-        checked = 0
-        
-        try:
-            for item in symbols_to_check:
-                symbol = item.get("symbol")
-                if not symbol:
-                    continue
-                
-                try:
-                    # نتحقق من القيمة السوقية
-                    market_cap = get_market_cap(symbol)
-                    checked += 1
-                    
-                    if market_cap and MIN_MARKET_CAP <= market_cap <= MAX_MARKET_CAP:
-                        # نأخذ بيانات السعر
-                        quote = get_quote(symbol)
-                        if quote:
-                            quote["market_cap"] = market_cap
-                            filtered_stocks.append(quote)
-                            print(f"✅ {symbol}: ${quote['close']:.2f}, {quote['change']:.2f}%, حجم: {quote['volume']:,}, قيمة: ${market_cap/1_000_000:.1f}M")
-                    
-                    # نحد من عدد الطلبات في الدقيقة (ننتظر 2 ثانية فقط)
-                    if checked % 55 == 0:
-                        print(f"⏳ تم فحص {checked} رمزاً، ننتظر 2 ثانية...")
-                        await asyncio.sleep(2)
-                        
-                except Exception as e:
-                    logging.error(f"⚠️ خطأ في {symbol}: {e}")
-                    logging.error(traceback.format_exc())
-                    continue
-                    
-        except Exception as e:
-            logging.error(f"⚠️ خطأ جسيم في الحلقة: {e}")
-            logging.error(traceback.format_exc())
-            await asyncio.sleep(30)
-            continue
-        
-        print(f"📡 تم العثور على {len(filtered_stocks)} سهماً ضمن الفئة المستهدفة")
-        
-        if not filtered_stocks:
-            print("⏳ لا توجد أسهم مطابقة، ننتظر 30 ثانية...")
-            await asyncio.sleep(30)
-            continue
-        
-        # ===== ترتيب حسب النشاط والزخم =====
-        filtered_stocks.sort(key=lambda x: (x["volume"] * x["close"]), reverse=True)
-        top_100 = filtered_stocks[:100]
-        
-        top_100.sort(key=lambda x: (abs(x["change"]) * x["volume"]), reverse=True)
-        top_40 = top_100[:40]
-        
-        # ===== إضافة Yahoo في التداول العادي =====
-        if current_session == "regular":
-            yahoo_symbols = [s["ticker"] for s in top_40[:10]]
-            yahoo_stocks = fetch_yahoo_stocks(yahoo_symbols)
-            # دمج بيانات Yahoo مع Finnhub
-            for y in yahoo_stocks:
-                for f in top_40:
-                    if f["ticker"] == y["ticker"]:
-                        f["close"] = y["close"]
-                        f["change"] = y["change"]
-                        f["volume"] = y["volume"]
-                        break
         
         # ===== تطبيق الشروط =====
         is_premarket = (current_session == "premarket" or current_session == "afterhours")
-        signals = detect(top_40, is_premarket)
+        signals = detect(stocks, is_premarket)
         
         print(f"✅ signals: {len(signals)}")
         
