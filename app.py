@@ -133,8 +133,40 @@ def get_market_cap(symbol):
     except Exception as e:
         return None
 
+# ================= GET QUOTE (Finnhub) =================
+def get_quote(symbol):
+    """تجلب بيانات السعر والحجم من Finnhub"""
+    try:
+        url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_KEY}"
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code == 429:
+            logging.warning(f"⚠️ [Quote] رمز {symbol} أعاد كود 429 (تجاوز الحد)")
+            return None
+            
+        if response.status_code != 200:
+            return None
+            
+        data = response.json()
+        price = data.get("c", 0)
+        change = data.get("dp", 0)
+        volume = data.get("v", 0)
+        
+        if price <= 0 or volume <= 0:
+            return None
+            
+        return {
+            "ticker": symbol,
+            "close": price,
+            "change": change,
+            "volume": volume
+        }
+        
+    except Exception as e:
+        return None
+
 # ================= GET QUOTE (Yahoo Finance via requests) =================
-def get_stock_quote(symbol):
+def get_yahoo_quote(symbol):
     """تجلب بيانات السعر والحجم من Yahoo Finance باستخدام requests"""
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1m&range=1d"
@@ -144,14 +176,11 @@ def get_stock_quote(symbol):
         response = requests.get(url, headers=headers, timeout=10)
         
         if response.status_code != 200:
-            logging.warning(f"⚠️ [Yahoo] رمز {symbol} أعاد كود {response.status_code}")
             return None
             
         data = response.json()
         
-        # التحقق من وجود البيانات
         if not data.get('chart', {}).get('result'):
-            logging.warning(f"⚠️ [Yahoo] لا توجد بيانات لـ {symbol}")
             return None
             
         meta = data['chart']['result'][0].get('meta', {})
@@ -159,7 +188,6 @@ def get_stock_quote(symbol):
         volume = meta.get('regularMarketVolume', 0)
         
         if price <= 0 or volume <= 0:
-            logging.warning(f"⚠️ [Yahoo] سعر أو حجم غير صحيح لـ {symbol}: price={price}, volume={volume}")
             return None
         
         prev_close = meta.get('regularMarketPreviousClose', price)
@@ -172,11 +200,7 @@ def get_stock_quote(symbol):
             "volume": volume
         }
         
-    except requests.exceptions.Timeout:
-        logging.warning(f"⚠️ [Yahoo] مهلة انتهت لـ {symbol}")
-        return None
     except Exception as e:
-        logging.warning(f"⚠️ [Yahoo] خطأ في {symbol}: {type(e).__name__}: {e}")
         return None
 
 # ================= VOLUME RATIO =================
@@ -282,9 +306,9 @@ async def main():
     print(f"📌 الجلسة: {get_session()}")
     print(f"💰 الفئة السعرية: ${MIN_PRICE} - ${MAX_PRICE}")
     print(f"📊 القيمة السوقية: ${MIN_MARKET_CAP/1_000_000:.0f}M - ${MAX_MARKET_CAP/1_000_000:.0f}M")
-    print(f"🔍 المصدر: Yahoo Finance (via requests) + Finnhub للقائمة والقيمة السوقية")
+    print(f"🔍 المصدر: Finnhub + Yahoo (محسن لتجنب 429)")
 
-    await send("📊 *M60 Hunter - Yahoo Finance (بدون قوائم ثابتة)*")
+    await send("📊 *M60 Hunter V7 - محسن للطلبات*")
 
     while True:
         current_session = get_session()
@@ -297,13 +321,14 @@ async def main():
             await asyncio.sleep(30)
             continue
 
-        # ===== نأخذ أول 200 سهم فقط لتجنب تجاوز حد الطلبات =====
-        symbols_to_check = all_symbols[:200]
+        # ===== نأخذ 150 سهم فقط لتقليل الطلبات =====
+        symbols_to_check = all_symbols[:150]
         print(f"📡 جاري تدقيق {len(symbols_to_check)} رمزاً (من أصل {len(all_symbols)})...")
         
         # ===== تصفية حسب القيمة السوقية =====
         filtered_stocks = []
         checked = 0
+        request_count = 0
         
         try:
             for item in symbols_to_check:
@@ -312,20 +337,26 @@ async def main():
                     continue
                 
                 try:
-                    # انتظر ثانية قبل كل طلب (تجنب 429)
-                    await asyncio.sleep(1)
+                    # انتظر 1.5 ثانية قبل كل طلب لتجنب 429
+                    await asyncio.sleep(1.5)
                     
                     # نتحقق من القيمة السوقية
                     market_cap = get_market_cap(symbol)
                     checked += 1
+                    request_count += 1
                     
                     if market_cap and MIN_MARKET_CAP <= market_cap <= MAX_MARKET_CAP:
-                        # نأخذ بيانات السعر من Yahoo Finance
-                        quote = get_stock_quote(symbol)
+                        # نأخذ بيانات السعر من Finnhub (مباشرة)
+                        quote = get_quote(symbol)
                         if quote:
                             quote["market_cap"] = market_cap
                             filtered_stocks.append(quote)
                             print(f"✅ {symbol}: ${quote['close']:.2f}, {quote['change']:.2f}%, حجم: {quote['volume']:,}, قيمة: ${market_cap/1_000_000:.1f}M")
+                    
+                    # نتحكم في عدد الطلبات كل 55 طلب ننتظر 5 ثواني إضافية
+                    if request_count % 55 == 0:
+                        print(f"⏳ تم إرسال {request_count} طلب، ننتظر 5 ثواني...")
+                        await asyncio.sleep(5)
                     
                 except Exception as e:
                     logging.error(f"⚠️ خطأ في {symbol}: {e}")
@@ -349,6 +380,15 @@ async def main():
         
         top_100.sort(key=lambda x: (abs(x["change"]) * x["volume"]), reverse=True)
         top_40 = top_100[:40]
+        
+        # ===== تحقق من Yahoo في التداول العادي =====
+        if current_session == "regular":
+            for f in top_40[:10]:
+                yahoo_data = get_yahoo_quote(f["ticker"])
+                if yahoo_data:
+                    f["close"] = yahoo_data["close"]
+                    f["change"] = yahoo_data["change"]
+                    f["volume"] = yahoo_data["volume"]
         
         # ===== تطبيق الشروط =====
         is_premarket = (current_session == "premarket" or current_session == "afterhours")
