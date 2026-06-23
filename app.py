@@ -8,7 +8,7 @@ from telegram import Bot
 import time
 from flask import Flask
 from threading import Thread
-import traceback  # تم إضافة هذه المكتبة لطباعة الأخطاء بالتفصيل
+import traceback
 
 # ================= FAKE WEB SERVER (for Render) =================
 web_app = Flask('')
@@ -116,6 +116,10 @@ def get_market_cap(symbol):
         url = f"https://finnhub.io/api/v1/stock/profile2?symbol={symbol}&token={FINNHUB_KEY}"
         response = requests.get(url, timeout=10)
         
+        if response.status_code == 429:
+            logging.warning(f"⚠️ [Profile] رمز {symbol} أعاد كود 429 (تجاوز الحد)")
+            return None
+            
         if response.status_code != 200:
             logging.warning(f"⚠️ [Profile] رمز {symbol} أعاد كود {response.status_code}")
             return None
@@ -138,6 +142,10 @@ def get_quote(symbol):
         url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_KEY}"
         response = requests.get(url, timeout=10)
         
+        if response.status_code == 429:
+            logging.warning(f"⚠️ [Quote] رمز {symbol} أعاد كود 429 (تجاوز الحد)")
+            return None
+            
         if response.status_code != 200:
             logging.warning(f"⚠️ [Quote] رمز {symbol} أعاد كود {response.status_code}")
             return None
@@ -317,21 +325,23 @@ async def main():
         #     await asyncio.sleep(300)
         #     continue
 
-        # ===== جلب القائمة الكاملة =====
+        # ===== جلب القائمة الكاملة (مع تقليل عدد الأسهم) =====
         all_symbols = get_symbols()
         if not all_symbols:
             print("⚠️ لا توجد رموز، إعادة المحاولة...")
             await asyncio.sleep(30)
             continue
 
-        print(f"📡 جاري تدقيق {len(all_symbols)} رمزاً...")
+        # ===== نأخذ أول 300 سهم فقط لتجنب تجاوز حد الطلبات =====
+        symbols_to_check = all_symbols[:300]
+        print(f"📡 جاري تدقيق {len(symbols_to_check)} رمزاً (من أصل {len(all_symbols)})...")
         
         # ===== تصفية حسب القيمة السوقية =====
         filtered_stocks = []
         checked = 0
         
-        try:  # تم إضافة try/except حول الحلقة الكاملة
-            for item in all_symbols:
+        try:
+            for item in symbols_to_check:
                 symbol = item.get("symbol")
                 if not symbol:
                     continue
@@ -349,14 +359,14 @@ async def main():
                             filtered_stocks.append(quote)
                             print(f"✅ {symbol}: ${quote['close']:.2f}, {quote['change']:.2f}%, حجم: {quote['volume']:,}, قيمة: ${market_cap/1_000_000:.1f}M")
                     
-                    # نحد من عدد الطلبات في الدقيقة (بدون توقف طويل)
+                    # نحد من عدد الطلبات في الدقيقة (ننتظر 2 ثانية فقط)
                     if checked % 55 == 0:
-                        print(f"⏳ تم فحص {checked} رمزاً، ننتظر 5 ثواني فقط...")
-                        await asyncio.sleep(5)  # تم التخفيف إلى 5 ثواني
+                        print(f"⏳ تم فحص {checked} رمزاً، ننتظر 2 ثانية...")
+                        await asyncio.sleep(2)
                         
                 except Exception as e:
                     logging.error(f"⚠️ خطأ في {symbol}: {e}")
-                    logging.error(traceback.format_exc())  # طباعة تفاصيل الخطأ
+                    logging.error(traceback.format_exc())
                     continue
                     
         except Exception as e:
