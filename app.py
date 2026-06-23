@@ -332,27 +332,33 @@ async def main():
             if not symbol:
                 continue
             
-            # نتحقق من القيمة السوقية
-            market_cap = get_market_cap(symbol)
-            checked += 1
-            
-            if market_cap and MIN_MARKET_CAP <= market_cap <= MAX_MARKET_CAP:
-                # نأخذ بيانات السعر
-                quote = get_quote(symbol)
-                if quote:
-                    quote["market_cap"] = market_cap
-                    filtered_stocks.append(quote)
-                    print(f"✅ {symbol}: ${quote['close']:.2f}, {quote['change']:.2f}%, حجم: {quote['volume']:,}, قيمة: ${market_cap/1_000_000:.1f}M")
-            
-            # نحد من عدد الطلبات في الدقيقة
-            if checked % 55 == 0:
-                print(f"⏳ تم فحص {checked} رمزاً، ننتظر 60 ثانية...")
-                await asyncio.sleep(60)
+            try:
+                # نتحقق من القيمة السوقية
+                market_cap = get_market_cap(symbol)
+                checked += 1
+                
+                if market_cap and MIN_MARKET_CAP <= market_cap <= MAX_MARKET_CAP:
+                    # نأخذ بيانات السعر
+                    quote = get_quote(symbol)
+                    if quote:
+                        quote["market_cap"] = market_cap
+                        filtered_stocks.append(quote)
+                        print(f"✅ {symbol}: ${quote['close']:.2f}, {quote['change']:.2f}%, حجم: {quote['volume']:,}, قيمة: ${market_cap/1_000_000:.1f}M")
+                
+                # نحد من عدد الطلبات في الدقيقة (بدون توقف طويل)
+                if checked % 55 == 0:
+                    print(f"⏳ تم فحص {checked} رمزاً، ننتظر 5 ثواني فقط...")
+                    await asyncio.sleep(5)  # ← خففناها من 60 إلى 5 ثواني
+                    
+            except Exception as e:
+                logging.warning(f"⚠️ خطأ في {symbol}: {e}")
+                continue
         
         print(f"📡 تم العثور على {len(filtered_stocks)} سهماً ضمن الفئة المستهدفة")
         
         if not filtered_stocks:
-            await asyncio.sleep(60)
+            print("⏳ لا توجد أسهم مطابقة، ننتظر 30 ثانية...")
+            await asyncio.sleep(30)
             continue
         
         # ===== ترتيب حسب النشاط والزخم =====
@@ -385,9 +391,9 @@ async def main():
             await send_alert(*s)
             await asyncio.sleep(1)
         
-        # ===== ننتظر دقيقتين قبل الدورة التالية =====
-        print(f"⏳ انتظار دقيقتين...")
-        await asyncio.sleep(120)
+        # ===== ننتظر 30 ثانية قبل الدورة التالية (للتجربة) =====
+        print(f"⏳ انتظار 30 ثانية...")
+        await asyncio.sleep(30)
 
 if __name__ == "__main__":
     asyncio.run(main())
