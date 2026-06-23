@@ -8,6 +8,7 @@ from telegram import Bot
 import time
 from flask import Flask
 from threading import Thread
+import traceback  # تم إضافة هذه المكتبة لطباعة الأخطاء بالتفصيل
 
 # ================= FAKE WEB SERVER (for Render) =================
 web_app = Flask('')
@@ -108,7 +109,7 @@ def get_symbols():
         logging.error(f"خطأ في جلب القائمة: {e}")
         return symbols_cache or []
 
-# ================= CHECK MARKET CAP =================
+# ================= CHECK MARKET CAP (مع طباعة الأخطاء) =================
 def get_market_cap(symbol):
     """تجلب القيمة السوقية للسهم من Finnhub"""
     try:
@@ -116,6 +117,7 @@ def get_market_cap(symbol):
         response = requests.get(url, timeout=10)
         
         if response.status_code != 200:
+            logging.warning(f"⚠️ [Profile] رمز {symbol} أعاد كود {response.status_code}")
             return None
             
         data = response.json()
@@ -126,10 +128,10 @@ def get_market_cap(symbol):
         return None
         
     except Exception as e:
-        logging.warning(f"خطأ في جلب القيمة السوقية لـ {symbol}: {e}")
+        logging.warning(f"⚠️ [Profile] خطأ في {symbol}: {e}")
         return None
 
-# ================= GET QUOTE =================
+# ================= GET QUOTE (مع طباعة الأخطاء) =================
 def get_quote(symbol):
     """تجلب بيانات السعر والحجم من Finnhub"""
     try:
@@ -137,6 +139,7 @@ def get_quote(symbol):
         response = requests.get(url, timeout=10)
         
         if response.status_code != 200:
+            logging.warning(f"⚠️ [Quote] رمز {symbol} أعاد كود {response.status_code}")
             return None
             
         data = response.json()
@@ -155,7 +158,7 @@ def get_quote(symbol):
         }
         
     except Exception as e:
-        logging.warning(f"خطأ في جلب بيانات {symbol}: {e}")
+        logging.warning(f"⚠️ [Quote] خطأ في {symbol}: {e}")
         return None
 
 # ================= YAHOO (للتداول العادي فقط) =================
@@ -327,32 +330,40 @@ async def main():
         filtered_stocks = []
         checked = 0
         
-        for item in all_symbols:
-            symbol = item.get("symbol")
-            if not symbol:
-                continue
-            
-            try:
-                # نتحقق من القيمة السوقية
-                market_cap = get_market_cap(symbol)
-                checked += 1
+        try:  # تم إضافة try/except حول الحلقة الكاملة
+            for item in all_symbols:
+                symbol = item.get("symbol")
+                if not symbol:
+                    continue
                 
-                if market_cap and MIN_MARKET_CAP <= market_cap <= MAX_MARKET_CAP:
-                    # نأخذ بيانات السعر
-                    quote = get_quote(symbol)
-                    if quote:
-                        quote["market_cap"] = market_cap
-                        filtered_stocks.append(quote)
-                        print(f"✅ {symbol}: ${quote['close']:.2f}, {quote['change']:.2f}%, حجم: {quote['volume']:,}, قيمة: ${market_cap/1_000_000:.1f}M")
-                
-                # نحد من عدد الطلبات في الدقيقة (بدون توقف طويل)
-                if checked % 55 == 0:
-                    print(f"⏳ تم فحص {checked} رمزاً، ننتظر 5 ثواني فقط...")
-                    await asyncio.sleep(5)  # ← خففناها من 60 إلى 5 ثواني
+                try:
+                    # نتحقق من القيمة السوقية
+                    market_cap = get_market_cap(symbol)
+                    checked += 1
                     
-            except Exception as e:
-                logging.warning(f"⚠️ خطأ في {symbol}: {e}")
-                continue
+                    if market_cap and MIN_MARKET_CAP <= market_cap <= MAX_MARKET_CAP:
+                        # نأخذ بيانات السعر
+                        quote = get_quote(symbol)
+                        if quote:
+                            quote["market_cap"] = market_cap
+                            filtered_stocks.append(quote)
+                            print(f"✅ {symbol}: ${quote['close']:.2f}, {quote['change']:.2f}%, حجم: {quote['volume']:,}, قيمة: ${market_cap/1_000_000:.1f}M")
+                    
+                    # نحد من عدد الطلبات في الدقيقة (بدون توقف طويل)
+                    if checked % 55 == 0:
+                        print(f"⏳ تم فحص {checked} رمزاً، ننتظر 5 ثواني فقط...")
+                        await asyncio.sleep(5)  # تم التخفيف إلى 5 ثواني
+                        
+                except Exception as e:
+                    logging.error(f"⚠️ خطأ في {symbol}: {e}")
+                    logging.error(traceback.format_exc())  # طباعة تفاصيل الخطأ
+                    continue
+                    
+        except Exception as e:
+            logging.error(f"⚠️ خطأ جسيم في الحلقة: {e}")
+            logging.error(traceback.format_exc())
+            await asyncio.sleep(30)
+            continue
         
         print(f"📡 تم العثور على {len(filtered_stocks)} سهماً ضمن الفئة المستهدفة")
         
@@ -391,7 +402,7 @@ async def main():
             await send_alert(*s)
             await asyncio.sleep(1)
         
-        # ===== ننتظر 30 ثانية قبل الدورة التالية (للتجربة) =====
+        # ===== ننتظر 30 ثانية قبل الدورة التالية =====
         print(f"⏳ انتظار 30 ثانية...")
         await asyncio.sleep(30)
 
