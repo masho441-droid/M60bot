@@ -1,4 +1,6 @@
-python-telegram-bot
-pytz
 requests
+pytz
+python-telegram-bot
 flask
+tvkit
+numpy
