@@ -9,7 +9,7 @@ import time
 from flask import Flask
 from threading import Thread
 import traceback
-from tradingview_screener import Query, Scanner
+import yfinance as yf
 
 # ================= FAKE WEB SERVER (for Render) =================
 web_app = Flask('')
@@ -134,26 +134,35 @@ def get_market_cap(symbol):
     except Exception as e:
         return None
 
-# ================= GET QUOTE (TradingView) =================
-def get_tradingview_quote(symbol):
-    """تجلب بيانات السعر والحجم من TradingView"""
+# ================= GET QUOTE (Yahoo Finance - yfinance) =================
+def get_stock_quote(symbol):
+    """تجلب بيانات السعر والحجم من Yahoo Finance باستخدام yfinance"""
     try:
-        # استخدام tradingview-screener للحصول على بيانات السهم
-        scanner = Scanner()
-        query = Query().select('close', 'volume', 'change').where('symbol', '=', symbol)
-        results = scanner.execute(query)
+        # إنشاء كائن Ticker للسهم
+        ticker = yf.Ticker(symbol)
         
-        if not results or len(results) == 0:
+        # جلب البيانات اللحظية (بما في ذلك سعر الافتتاح والجلسة السابقة)
+        # استخدام interval='1m' للحصول على أحدث البيانات
+        data = ticker.history(period="1d", interval="1m")
+        
+        if data.empty:
+            logging.warning(f"⚠️ [yfinance] لا توجد بيانات لـ {symbol}")
             return None
             
-        data = results[0]
-        price = data.get('close', 0)
-        change = data.get('change', 0)
-        volume = data.get('volume', 0)
+        # الحصول على آخر سعر وحجم من البيانات
+        last_row = data.iloc[-1]
+        price = float(last_row['Close'])
+        volume = int(last_row['Volume'])
         
         if price <= 0 or volume <= 0:
+            logging.warning(f"⚠️ [yfinance] سعر أو حجم غير صحيح لـ {symbol}: price={price}, volume={volume}")
             return None
-            
+        
+        # حساب التغير المئوي بالنسبة لسعر الإغلاق السابق
+        # الحصول على سعر الإغلاق لليوم السابق
+        prev_close = ticker.info.get('previousClose', price)
+        change = ((price - prev_close) / prev_close) * 100 if prev_close else 0
+        
         return {
             "ticker": symbol,
             "close": price,
@@ -162,10 +171,10 @@ def get_tradingview_quote(symbol):
         }
         
     except Exception as e:
-        logging.warning(f"⚠️ [TradingView] خطأ في {symbol}: {e}")
+        logging.warning(f"⚠️ [yfinance] خطأ في {symbol}: {e}")
         return None
 
-# ================= YAHOO (نسخة احتياطية) =================
+# ================= YAHOO (نسخة احتياطية - Requests) =================
 def fetch_yahoo_stocks(symbols):
     """جلب بيانات Yahoo لرموز محددة (نسخة احتياطية)"""
     if not symbols:
@@ -308,9 +317,9 @@ async def main():
     print(f"📌 الجلسة: {get_session()}")
     print(f"💰 الفئة السعرية: ${MIN_PRICE} - ${MAX_PRICE}")
     print(f"📊 القيمة السوقية: ${MIN_MARKET_CAP/1_000_000:.0f}M - ${MAX_MARKET_CAP/1_000_000:.0f}M")
-    print(f"🔍 المصدر: TradingView (مع Finnhub للقائمة والقيمة السوقية)")
+    print(f"🔍 المصدر: Yahoo Finance (yfinance) مع Finnhub للقائمة والقيمة السوقية")
 
-    await send("📊 *M60 Hunter - TradingView (بدون قوائم ثابتة)*")
+    await send("📊 *M60 Hunter - Yahoo Finance (بدون قوائم ثابتة)*")
 
     while True:
         current_session = get_session()
@@ -346,8 +355,8 @@ async def main():
                     checked += 1
                     
                     if market_cap and MIN_MARKET_CAP <= market_cap <= MAX_MARKET_CAP:
-                        # نأخذ بيانات السعر من TradingView
-                        quote = get_tradingview_quote(symbol)
+                        # نأخذ بيانات السعر من Yahoo Finance
+                        quote = get_stock_quote(symbol)
                         if quote:
                             quote["market_cap"] = market_cap
                             filtered_stocks.append(quote)
