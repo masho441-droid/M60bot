@@ -6,6 +6,21 @@ import requests
 from datetime import datetime, time as dt_time
 from telegram import Bot
 import time
+from flask import Flask
+from threading import Thread
+
+# ================= FAKE WEB SERVER (for Render) =================
+web_app = Flask('')
+
+@web_app.route('/')
+def home():
+    return "M60bot is running!"
+
+def run_web_server():
+    web_app.run(host='0.0.0.0', port=10000)
+
+# ================= START WEB SERVER IN BACKGROUND =================
+Thread(target=run_web_server, daemon=True).start()
 
 # ================= LOGGING =================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
