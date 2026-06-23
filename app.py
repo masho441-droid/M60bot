@@ -79,28 +79,40 @@ def fetch_yahoo_stocks():
     """جلب الأسهم من Yahoo فقط (للتجربة)"""
     print("📡 [Yahoo] جاري جلب الأسهم...")
     
-    # قائمة تجريبية من الأسهم المعروفة (للتجربة)
+    # قائمة تجريبية من الأسهم المعروفة
     test_symbols = ["AAPL", "TSLA", "NVDA", "AMD", "AMZN", "MSFT", "GOOGL", "META", "NFLX", "INTC"]
     
     stocks = []
     for symbol in test_symbols:
         try:
+            print(f"📡 [Yahoo] جاري جلب {symbol}...")
+            
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=5m&range=1d"
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            response = requests.get(url, headers=headers, timeout=10)
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+            response = requests.get(url, headers=headers, timeout=30)  # زيادة المهلة إلى 30 ثانية
+            
+            print(f"📡 [Yahoo] {symbol} - كود الاستجابة: {response.status_code}")
             
             if response.status_code != 200:
                 print(f"⚠️ Yahoo خطأ في {symbol}: كود {response.status_code}")
                 continue
                 
             data = response.json()
-            meta = data.get('chart', {}).get('result', [{}])[0].get('meta', {})
+            
+            # التحقق من وجود البيانات
+            if not data.get('chart', {}).get('result'):
+                print(f"⚠️ {symbol}: لا توجد بيانات في الاستجابة")
+                continue
+                
+            meta = data['chart']['result'][0].get('meta', {})
             
             price = meta.get('regularMarketPrice', 0)
             volume = meta.get('regularMarketVolume', 0)
             
             if price <= 0 or volume <= 0:
-                print(f"⚠️ {symbol}: سعر أو حجم غير صحيح")
+                print(f"⚠️ {symbol}: سعر أو حجم غير صحيح (price={price}, volume={volume})")
                 continue
             
             prev_close = meta.get('regularMarketPreviousClose', price)
@@ -114,11 +126,15 @@ def fetch_yahoo_stocks():
             })
             print(f"✅ {symbol}: ${price:.2f}, {change:.2f}%, حجم: {volume:,}")
             
+        except requests.exceptions.Timeout:
+            print(f"⚠️ {symbol}: مهلة الاتصال انتهت (Timeout)")
+        except requests.exceptions.ConnectionError:
+            print(f"⚠️ {symbol}: خطأ في الاتصال (ConnectionError)")
         except Exception as e:
-            print(f"⚠️ Yahoo خطأ في {symbol}: {e}")
+            print(f"⚠️ {symbol}: خطأ غير متوقع: {type(e).__name__}: {e}")
             continue
     
-    print(f"📡 [Yahoo] تم جلب {len(stocks)} سهماً")
+    print(f"📡 [Yahoo] تم جلب {len(stocks)} سهماً من أصل {len(test_symbols)}")
     return stocks
 
 # ================= VOLUME RATIO =================
