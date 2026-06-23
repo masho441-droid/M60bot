@@ -8,7 +8,8 @@ from telegram import Bot
 import time
 from flask import Flask
 from threading import Thread
-import traceback
+import numpy as np
+from tvkit import TVClient  # TradingView Client
 
 # ================= FAKE WEB SERVER (for Render) =================
 web_app = Flask('')
@@ -29,7 +30,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
 # ================= ENV =================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-FINNHUB_KEY = os.getenv("FINNHUB_KEY")
+FINNHUB_KEY = os.getenv("FINNHUB_KEY")  # للاستخدام الاحتياطي فقط
 
 if not TOKEN or not CHAT_ID:
     raise ValueError("Missing Telegram config")
@@ -74,45 +75,88 @@ async def send(msg):
     except Exception as e:
         logging.error(e)
 
-# ================= YAHOO (المصدر الوحيد الآن) =================
-def fetch_yahoo_stocks():
-    """جلب الأسهم من Yahoo فقط (للتجربة)"""
-    print("📡 [Yahoo] جاري جلب الأسهم...")
+# ================= TRADINGVIEW (المصدر الرئيسي) =================
+def fetch_tradingview_stocks():
+    """جلب الأسهم من TradingView باستخدام tvkit"""
+    print("📡 [TradingView] جاري جلب الأسهم...")
     
     # قائمة تجريبية من الأسهم المعروفة
     test_symbols = ["AAPL", "TSLA", "NVDA", "AMD", "AMZN", "MSFT", "GOOGL", "META", "NFLX", "INTC"]
     
     stocks = []
+    
+    try:
+        # إنشاء عميل TradingView
+        client = TVClient()
+        
+        for symbol in test_symbols:
+            try:
+                print(f"📡 [TradingView] جاري جلب {symbol}...")
+                
+                # جلب البيانات من TradingView
+                # ملاحظة: tvkit يستخدم صيغة مختلفة للرموز، نضيف "NASDAQ:" أو "NYSE:" حسب الحاجة
+                # للتجربة، نستخدم الصيغة المبسطة
+                data = client.get_quote(symbol)
+                
+                if not data:
+                    print(f"⚠️ {symbol}: لا توجد بيانات")
+                    continue
+                
+                # استخراج البيانات
+                price = data.get('close', 0)
+                volume = data.get('volume', 0)
+                change = data.get('change', 0)
+                
+                if price <= 0 or volume <= 0:
+                    print(f"⚠️ {symbol}: سعر أو حجم غير صحيح (price={price}, volume={volume})")
+                    continue
+                
+                stocks.append({
+                    "ticker": symbol,
+                    "close": price,
+                    "change": change,
+                    "volume": volume
+                })
+                print(f"✅ {symbol}: ${price:.2f}, {change:.2f}%, حجم: {volume:,}")
+                
+            except Exception as e:
+                print(f"⚠️ {symbol}: خطأ: {type(e).__name__}: {e}")
+                continue
+        
+        print(f"📡 [TradingView] تم جلب {len(stocks)} سهماً")
+        return stocks
+        
+    except Exception as e:
+        print(f"⚠️ [TradingView] خطأ في الاتصال: {e}")
+        # في حال فشل TradingView، نستخدم Yahoo كنسخة احتياطية
+        print("📡 [TradingView] فشل الاتصال، استخدام Yahoo كنسخة احتياطية...")
+        return fetch_yahoo_fallback()
+
+def fetch_yahoo_fallback():
+    """نسخة احتياطية باستخدام Yahoo"""
+    print("📡 [Yahoo - Fallback] جاري جلب الأسهم...")
+    
+    test_symbols = ["AAPL", "TSLA", "NVDA", "AMD", "AMZN", "MSFT", "GOOGL", "META", "NFLX", "INTC"]
+    
+    stocks = []
     for symbol in test_symbols:
         try:
-            print(f"📡 [Yahoo] جاري جلب {symbol}...")
-            
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=5m&range=1d"
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
-            response = requests.get(url, headers=headers, timeout=30)  # زيادة المهلة إلى 30 ثانية
-            
-            print(f"📡 [Yahoo] {symbol} - كود الاستجابة: {response.status_code}")
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            response = requests.get(url, headers=headers, timeout=30)
             
             if response.status_code != 200:
-                print(f"⚠️ Yahoo خطأ في {symbol}: كود {response.status_code}")
                 continue
                 
             data = response.json()
-            
-            # التحقق من وجود البيانات
             if not data.get('chart', {}).get('result'):
-                print(f"⚠️ {symbol}: لا توجد بيانات في الاستجابة")
                 continue
                 
             meta = data['chart']['result'][0].get('meta', {})
-            
             price = meta.get('regularMarketPrice', 0)
             volume = meta.get('regularMarketVolume', 0)
             
             if price <= 0 or volume <= 0:
-                print(f"⚠️ {symbol}: سعر أو حجم غير صحيح (price={price}, volume={volume})")
                 continue
             
             prev_close = meta.get('regularMarketPreviousClose', price)
@@ -126,15 +170,10 @@ def fetch_yahoo_stocks():
             })
             print(f"✅ {symbol}: ${price:.2f}, {change:.2f}%, حجم: {volume:,}")
             
-        except requests.exceptions.Timeout:
-            print(f"⚠️ {symbol}: مهلة الاتصال انتهت (Timeout)")
-        except requests.exceptions.ConnectionError:
-            print(f"⚠️ {symbol}: خطأ في الاتصال (ConnectionError)")
         except Exception as e:
-            print(f"⚠️ {symbol}: خطأ غير متوقع: {type(e).__name__}: {e}")
             continue
     
-    print(f"📡 [Yahoo] تم جلب {len(stocks)} سهماً من أصل {len(test_symbols)}")
+    print(f"📡 [Yahoo - Fallback] تم جلب {len(stocks)} سهماً")
     return stocks
 
 # ================= VOLUME RATIO =================
@@ -239,16 +278,16 @@ async def main():
     print(f"🕒 الوقت: {ny().strftime('%H:%M:%S')}")
     print(f"📌 الجلسة: {get_session()}")
     print(f"💰 الفئة السعرية: ${MIN_PRICE} - ${MAX_PRICE}")
-    print(f"🔍 وضع الاختبار: يعمل على Yahoo فقط")
+    print(f"🔍 المصدر: TradingView (مع Yahoo كنسخة احتياطية)")
 
-    await send("🧪 *M60 Hunter - وضع الاختبار (Yahoo فقط)*")
+    await send("📊 *M60 Hunter - TradingView*")
 
     while True:
         current_session = get_session()
         print(f"\n🔄 دورة جديدة - {current_session}")
         
-        # ===== جلب الأسهم من Yahoo فقط =====
-        stocks = fetch_yahoo_stocks()
+        # ===== جلب الأسهم من TradingView =====
+        stocks = fetch_tradingview_stocks()
         
         if not stocks:
             print("⚠️ لم يتم جلب أي أسهم، إعادة المحاولة...")
