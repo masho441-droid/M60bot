@@ -28,7 +28,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
 # ================= ENV =================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-FINNHUB_KEY = os.getenv("FINNHUB_KEY")  # للاستخدام الاحتياطي فقط
+FINNHUB_KEY = os.getenv("FINNHUB_KEY")  # للاستخدام الاحتياطي فقط (غير مستخدم)
 
 if not TOKEN or not CHAT_ID:
     raise ValueError("Missing Telegram config")
@@ -99,7 +99,7 @@ def get_stock_data(symbol):
         change = ((price - prev_close) / prev_close) * 100 if prev_close else 0
         
         # التحقق من صحة البيانات
-        if price <= 0 or volume <= 0:
+        if price <= 0 or volume <= 0 or market_cap <= 0:
             return None
         
         return {
@@ -224,12 +224,11 @@ async def main():
     print(f"📌 الجلسة: {get_session()}")
     print(f"💰 الفئة السعرية: ${MIN_PRICE} - ${MAX_PRICE}")
     print(f"📊 القيمة السوقية: ${MIN_MARKET_CAP/1_000_000:.0f}M - ${MAX_MARKET_CAP/1_000_000:.0f}M")
-    print(f"🔍 المصدر: Yahoo Finance (yfinance) - بدون حدود للطلبات")
+    print(f"🔍 المصدر: Yahoo Finance (yfinance) - بدون Finnhub نهائياً")
 
-    await send("📊 *M60 Hunter V8 - Yahoo Finance (بدون حدود)*")
+    await send("📊 *M60 Hunter V9 - Yahoo Finance فقط*")
 
-    # قائمة الأسهم التجريبية (للتجربة - سنقوم بجلبها من Finnhub لاحقاً)
-    # مؤقتاً، نستخدم قائمة صغيرة للاختبار
+    # قائمة تجريبية للاختبار (سيتم استبدالها بقائمة ديناميكية لاحقاً)
     test_symbols = ["AAPL", "TSLA", "NVDA", "AMD", "AMZN", "MSFT", "GOOGL", "META", "NFLX", "INTC"]
     
     while True:
