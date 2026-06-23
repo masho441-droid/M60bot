@@ -34,13 +34,13 @@ if not TOKEN or not CHAT_ID:
 
 bot = Bot(token=TOKEN)
 
-# ================= SETTINGS =================
-MIN_PRICE = 0.5
-MAX_PRICE = 10.0
-MIN_MOVE = 1.0
-MIN_VOLUME = 50000
-MIN_MARKET_CAP = 10_000_000
-MAX_MARKET_CAP = 150_000_000
+# ================= SETTINGS (مخففة للتجربة) =================
+MIN_PRICE = 0.01
+MAX_PRICE = 10000
+MIN_MOVE = 0.01
+MIN_VOLUME = 1
+MIN_MARKET_CAP = 0
+MAX_MARKET_CAP = 10**12
 
 last_alert = {}
 
@@ -89,7 +89,7 @@ def check_stock(symbol):
         if price <= 0 or volume <= 0:
             return None
         
-        # التحقق من الشروط
+        # التحقق من الشروط المخففة
         if price < MIN_PRICE or price > MAX_PRICE:
             return None
         if volume < MIN_VOLUME:
@@ -126,7 +126,7 @@ def check_stock(symbol):
 
 # ================= MAIN =================
 async def main():
-    await send("🔥 *M60 Hunter - بدء العمل*")
+    await send("🔥 *M60 Hunter - بدء العمل (وضع الاختبار)*")
     
     while True:
         try:
