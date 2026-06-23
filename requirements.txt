@@ -2,5 +2,5 @@ requests
 pytz
 python-telegram-bot
 flask
-tradingview-screener
+yfinance
 numpy
