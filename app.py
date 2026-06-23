@@ -2,13 +2,12 @@ import os
 import asyncio
 import logging
 import pytz
-import requests
+import yfinance as yf
 from datetime import datetime, time as dt_time
 from telegram import Bot
 import time
 from flask import Flask
 from threading import Thread
-import traceback
 
 # ================= FAKE WEB SERVER (for Render) =================
 web_app = Flask('')
@@ -29,7 +28,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
 # ================= ENV =================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-FINNHUB_KEY = os.getenv("FINNHUB_KEY")
+FINNHUB_KEY = os.getenv("FINNHUB_KEY")  # للاستخدام الاحتياطي فقط
 
 if not TOKEN or not CHAT_ID:
     raise ValueError("Missing Telegram config")
@@ -54,8 +53,6 @@ PREMARKET_MIN_REL_VOL = 0.8
 last_alert = {}
 alert_counters = {}
 alert_history = {}
-symbols_cache = None
-last_cache_update = 0
 
 # ================= TIME =================
 def ny():
@@ -78,129 +75,43 @@ async def send(msg):
     except Exception as e:
         logging.error(e)
 
-# ================= GET SYMBOLS LIST (Finnhub - CACHED) =================
-def get_symbols():
-    """تجلب قائمة الرموز من Finnhub وتخزنها مؤقتاً لمدة ساعة"""
-    global symbols_cache, last_cache_update
-    
-    now = time.time()
-    if symbols_cache and (now - last_cache_update) < 3600:  # ساعة واحدة
-        return symbols_cache
-    
+# ================= GET STOCK DATA (Yahoo Finance - yfinance) =================
+def get_stock_data(symbol):
+    """تجلب جميع بيانات السهم من Yahoo Finance في طلب واحد"""
     try:
-        url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_KEY}"
-        response = requests.get(url, timeout=30)
+        ticker = yf.Ticker(symbol)
         
-        if response.status_code != 200:
-            logging.error(f"خطأ في جلب القائمة: {response.status_code}")
-            return symbols_cache or []
-            
-        data = response.json()
-        if isinstance(data, list):
-            symbols_cache = data
-            last_cache_update = now
-            logging.info(f"✅ تم تحديث قائمة الرموز: {len(symbols_cache)} رمزاً")
-            return symbols_cache
-        else:
-            logging.error("بيانات غير متوقعة من Finnhub")
-            return []
-            
-    except Exception as e:
-        logging.error(f"خطأ في جلب القائمة: {e}")
-        return symbols_cache or []
-
-# ================= CHECK MARKET CAP (Finnhub) =================
-def get_market_cap(symbol):
-    """تجلب القيمة السوقية للسهم من Finnhub"""
-    try:
-        url = f"https://finnhub.io/api/v1/stock/profile2?symbol={symbol}&token={FINNHUB_KEY}"
-        response = requests.get(url, timeout=10)
+        # جلب المعلومات الأساسية
+        info = ticker.info
         
-        if response.status_code == 429:
-            logging.warning(f"⚠️ [Profile] رمز {symbol} أعاد كود 429 (تجاوز الحد)")
-            return None
-            
-        if response.status_code != 200:
-            return None
-            
-        data = response.json()
-        market_cap = data.get("marketCapitalization")
+        # جلب البيانات اللحظية
+        data = ticker.history(period="1d", interval="1m")
         
-        if market_cap:
-            return float(market_cap) * 1_000_000  # تحويل إلى دولار
-        return None
-        
-    except Exception as e:
-        return None
-
-# ================= GET QUOTE (Finnhub) =================
-def get_quote(symbol):
-    """تجلب بيانات السعر والحجم من Finnhub"""
-    try:
-        url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_KEY}"
-        response = requests.get(url, timeout=10)
-        
-        if response.status_code == 429:
-            logging.warning(f"⚠️ [Quote] رمز {symbol} أعاد كود 429 (تجاوز الحد)")
-            return None
-            
-        if response.status_code != 200:
-            return None
-            
-        data = response.json()
-        price = data.get("c", 0)
-        change = data.get("dp", 0)
-        volume = data.get("v", 0)
-        
-        if price <= 0 or volume <= 0:
-            return None
-            
-        return {
-            "ticker": symbol,
-            "close": price,
-            "change": change,
-            "volume": volume
-        }
-        
-    except Exception as e:
-        return None
-
-# ================= GET QUOTE (Yahoo Finance via requests) =================
-def get_yahoo_quote(symbol):
-    """تجلب بيانات السعر والحجم من Yahoo Finance باستخدام requests"""
-    try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1m&range=1d"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        response = requests.get(url, headers=headers, timeout=10)
-        
-        if response.status_code != 200:
-            return None
-            
-        data = response.json()
-        
-        if not data.get('chart', {}).get('result'):
-            return None
-            
-        meta = data['chart']['result'][0].get('meta', {})
-        price = meta.get('regularMarketPrice', 0)
-        volume = meta.get('regularMarketVolume', 0)
-        
-        if price <= 0 or volume <= 0:
+        if data.empty:
             return None
         
-        prev_close = meta.get('regularMarketPreviousClose', price)
+        # استخراج البيانات
+        last_row = data.iloc[-1]
+        price = float(last_row['Close'])
+        volume = int(last_row['Volume'])
+        market_cap = info.get('marketCap', 0)
+        prev_close = info.get('previousClose', price)
         change = ((price - prev_close) / prev_close) * 100 if prev_close else 0
         
+        # التحقق من صحة البيانات
+        if price <= 0 or volume <= 0:
+            return None
+        
         return {
             "ticker": symbol,
             "close": price,
             "change": change,
-            "volume": volume
+            "volume": volume,
+            "market_cap": market_cap
         }
         
     except Exception as e:
+        logging.warning(f"⚠️ [yfinance] خطأ في {symbol}: {e}")
         return None
 
 # ================= VOLUME RATIO =================
@@ -215,10 +126,17 @@ def valid(stock, is_premarket=False):
         price = float(stock.get("close") or 0)
         change = float(stock.get("change") or 0)
         vol = float(stock.get("volume") or 0)
+        market_cap = float(stock.get("market_cap") or 0)
 
+        # تصفية حسب الفئة السعرية
         if price < MIN_PRICE or price > MAX_PRICE:
             return False
         
+        # تصفية حسب القيمة السوقية
+        if market_cap < MIN_MARKET_CAP or market_cap > MAX_MARKET_CAP:
+            return False
+        
+        # تصفية حسب الجلسة
         if is_premarket:
             if vol < PREMARKET_MIN_VOLUME or change < PREMARKET_MIN_MOVE:
                 return False
@@ -306,93 +224,42 @@ async def main():
     print(f"📌 الجلسة: {get_session()}")
     print(f"💰 الفئة السعرية: ${MIN_PRICE} - ${MAX_PRICE}")
     print(f"📊 القيمة السوقية: ${MIN_MARKET_CAP/1_000_000:.0f}M - ${MAX_MARKET_CAP/1_000_000:.0f}M")
-    print(f"🔍 المصدر: Finnhub + Yahoo (محسن لتجنب 429)")
+    print(f"🔍 المصدر: Yahoo Finance (yfinance) - بدون حدود للطلبات")
 
-    await send("📊 *M60 Hunter V7 - محسن للطلبات*")
+    await send("📊 *M60 Hunter V8 - Yahoo Finance (بدون حدود)*")
 
+    # قائمة الأسهم التجريبية (للتجربة - سنقوم بجلبها من Finnhub لاحقاً)
+    # مؤقتاً، نستخدم قائمة صغيرة للاختبار
+    test_symbols = ["AAPL", "TSLA", "NVDA", "AMD", "AMZN", "MSFT", "GOOGL", "META", "NFLX", "INTC"]
+    
     while True:
         current_session = get_session()
         print(f"\n🔄 دورة جديدة - {current_session}")
         
-        # ===== جلب القائمة الأولية من Finnhub =====
-        all_symbols = get_symbols()
-        if not all_symbols:
-            print("⚠️ لا توجد رموز، إعادة المحاولة...")
+        # ===== جلب البيانات من Yahoo Finance =====
+        stocks = []
+        
+        for symbol in test_symbols:
+            try:
+                data = get_stock_data(symbol)
+                if data:
+                    stocks.append(data)
+                    print(f"✅ {symbol}: ${data['close']:.2f}, {data['change']:.2f}%, حجم: {data['volume']:,}, قيمة: ${data['market_cap']/1_000_000:.1f}M")
+                await asyncio.sleep(0.5)  # انتظار نصف ثانية بين الطلبات
+            except Exception as e:
+                logging.error(f"⚠️ خطأ في {symbol}: {e}")
+                continue
+        
+        print(f"📡 تم جلب {len(stocks)} سهماً")
+        
+        if not stocks:
+            print("⚠️ لم يتم جلب أي أسهم، إعادة المحاولة...")
             await asyncio.sleep(30)
             continue
-
-        # ===== نأخذ 150 سهم فقط لتقليل الطلبات =====
-        symbols_to_check = all_symbols[:150]
-        print(f"📡 جاري تدقيق {len(symbols_to_check)} رمزاً (من أصل {len(all_symbols)})...")
-        
-        # ===== تصفية حسب القيمة السوقية =====
-        filtered_stocks = []
-        checked = 0
-        request_count = 0
-        
-        try:
-            for item in symbols_to_check:
-                symbol = item.get("symbol")
-                if not symbol:
-                    continue
-                
-                try:
-                    # انتظر 1.5 ثانية قبل كل طلب لتجنب 429
-                    await asyncio.sleep(1.5)
-                    
-                    # نتحقق من القيمة السوقية
-                    market_cap = get_market_cap(symbol)
-                    checked += 1
-                    request_count += 1
-                    
-                    if market_cap and MIN_MARKET_CAP <= market_cap <= MAX_MARKET_CAP:
-                        # نأخذ بيانات السعر من Finnhub (مباشرة)
-                        quote = get_quote(symbol)
-                        if quote:
-                            quote["market_cap"] = market_cap
-                            filtered_stocks.append(quote)
-                            print(f"✅ {symbol}: ${quote['close']:.2f}, {quote['change']:.2f}%, حجم: {quote['volume']:,}, قيمة: ${market_cap/1_000_000:.1f}M")
-                    
-                    # نتحكم في عدد الطلبات كل 55 طلب ننتظر 5 ثواني إضافية
-                    if request_count % 55 == 0:
-                        print(f"⏳ تم إرسال {request_count} طلب، ننتظر 5 ثواني...")
-                        await asyncio.sleep(5)
-                    
-                except Exception as e:
-                    logging.error(f"⚠️ خطأ في {symbol}: {e}")
-                    continue
-                    
-        except Exception as e:
-            logging.error(f"⚠️ خطأ جسيم في الحلقة: {e}")
-            await asyncio.sleep(30)
-            continue
-        
-        print(f"📡 تم العثور على {len(filtered_stocks)} سهماً ضمن الفئة المستهدفة")
-        
-        if not filtered_stocks:
-            print("⏳ لا توجد أسهم مطابقة، ننتظر 30 ثانية...")
-            await asyncio.sleep(30)
-            continue
-        
-        # ===== ترتيب حسب النشاط والزخم =====
-        filtered_stocks.sort(key=lambda x: (x["volume"] * x["close"]), reverse=True)
-        top_100 = filtered_stocks[:100]
-        
-        top_100.sort(key=lambda x: (abs(x["change"]) * x["volume"]), reverse=True)
-        top_40 = top_100[:40]
-        
-        # ===== تحقق من Yahoo في التداول العادي =====
-        if current_session == "regular":
-            for f in top_40[:10]:
-                yahoo_data = get_yahoo_quote(f["ticker"])
-                if yahoo_data:
-                    f["close"] = yahoo_data["close"]
-                    f["change"] = yahoo_data["change"]
-                    f["volume"] = yahoo_data["volume"]
         
         # ===== تطبيق الشروط =====
         is_premarket = (current_session == "premarket" or current_session == "afterhours")
-        signals = detect(top_40, is_premarket)
+        signals = detect(stocks, is_premarket)
         
         print(f"✅ signals: {len(signals)}")
         
@@ -400,9 +267,9 @@ async def main():
             await send_alert(*s)
             await asyncio.sleep(1)
         
-        # ===== ننتظر 30 ثانية قبل الدورة التالية =====
-        print(f"⏳ انتظار 30 ثانية...")
-        await asyncio.sleep(30)
+        # ===== ننتظر 60 ثانية قبل الدورة التالية =====
+        print(f"⏳ انتظار 60 ثانية...")
+        await asyncio.sleep(60)
 
 if __name__ == "__main__":
     asyncio.run(main())
