@@ -9,7 +9,6 @@ import time
 from flask import Flask
 from threading import Thread
 import traceback
-import yfinance as yf
 
 # ================= FAKE WEB SERVER (for Render) =================
 web_app = Flask('')
@@ -134,33 +133,36 @@ def get_market_cap(symbol):
     except Exception as e:
         return None
 
-# ================= GET QUOTE (Yahoo Finance - yfinance) =================
+# ================= GET QUOTE (Yahoo Finance via requests) =================
 def get_stock_quote(symbol):
-    """تجلب بيانات السعر والحجم من Yahoo Finance باستخدام yfinance"""
+    """تجلب بيانات السعر والحجم من Yahoo Finance باستخدام requests"""
     try:
-        # إنشاء كائن Ticker للسهم
-        ticker = yf.Ticker(symbol)
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1m&range=1d"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=10)
         
-        # جلب البيانات اللحظية (بما في ذلك سعر الافتتاح والجلسة السابقة)
-        # استخدام interval='1m' للحصول على أحدث البيانات
-        data = ticker.history(period="1d", interval="1m")
-        
-        if data.empty:
-            logging.warning(f"⚠️ [yfinance] لا توجد بيانات لـ {symbol}")
+        if response.status_code != 200:
+            logging.warning(f"⚠️ [Yahoo] رمز {symbol} أعاد كود {response.status_code}")
             return None
             
-        # الحصول على آخر سعر وحجم من البيانات
-        last_row = data.iloc[-1]
-        price = float(last_row['Close'])
-        volume = int(last_row['Volume'])
+        data = response.json()
+        
+        # التحقق من وجود البيانات
+        if not data.get('chart', {}).get('result'):
+            logging.warning(f"⚠️ [Yahoo] لا توجد بيانات لـ {symbol}")
+            return None
+            
+        meta = data['chart']['result'][0].get('meta', {})
+        price = meta.get('regularMarketPrice', 0)
+        volume = meta.get('regularMarketVolume', 0)
         
         if price <= 0 or volume <= 0:
-            logging.warning(f"⚠️ [yfinance] سعر أو حجم غير صحيح لـ {symbol}: price={price}, volume={volume}")
+            logging.warning(f"⚠️ [Yahoo] سعر أو حجم غير صحيح لـ {symbol}: price={price}, volume={volume}")
             return None
         
-        # حساب التغير المئوي بالنسبة لسعر الإغلاق السابق
-        # الحصول على سعر الإغلاق لليوم السابق
-        prev_close = ticker.info.get('previousClose', price)
+        prev_close = meta.get('regularMarketPreviousClose', price)
         change = ((price - prev_close) / prev_close) * 100 if prev_close else 0
         
         return {
@@ -170,49 +172,12 @@ def get_stock_quote(symbol):
             "volume": volume
         }
         
-    except Exception as e:
-        logging.warning(f"⚠️ [yfinance] خطأ في {symbol}: {e}")
+    except requests.exceptions.Timeout:
+        logging.warning(f"⚠️ [Yahoo] مهلة انتهت لـ {symbol}")
         return None
-
-# ================= YAHOO (نسخة احتياطية - Requests) =================
-def fetch_yahoo_stocks(symbols):
-    """جلب بيانات Yahoo لرموز محددة (نسخة احتياطية)"""
-    if not symbols:
-        return []
-    
-    stocks = []
-    for symbol in symbols[:10]:
-        try:
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=5m&range=1d"
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            response = requests.get(url, headers=headers, timeout=10)
-            
-            if response.status_code != 200:
-                continue
-                
-            data = response.json()
-            meta = data.get('chart', {}).get('result', [{}])[0].get('meta', {})
-            
-            price = meta.get('regularMarketPrice', 0)
-            volume = meta.get('regularMarketVolume', 0)
-            
-            if price <= 0 or volume <= 0:
-                continue
-            
-            prev_close = meta.get('regularMarketPreviousClose', price)
-            change = ((price - prev_close) / prev_close) * 100 if prev_close else 0
-            
-            stocks.append({
-                "ticker": symbol,
-                "close": price,
-                "change": change,
-                "volume": volume
-            })
-            
-        except Exception as e:
-            continue
-    
-    return stocks
+    except Exception as e:
+        logging.warning(f"⚠️ [Yahoo] خطأ في {symbol}: {type(e).__name__}: {e}")
+        return None
 
 # ================= VOLUME RATIO =================
 def calculate_rel_vol(volume):
@@ -317,7 +282,7 @@ async def main():
     print(f"📌 الجلسة: {get_session()}")
     print(f"💰 الفئة السعرية: ${MIN_PRICE} - ${MAX_PRICE}")
     print(f"📊 القيمة السوقية: ${MIN_MARKET_CAP/1_000_000:.0f}M - ${MAX_MARKET_CAP/1_000_000:.0f}M")
-    print(f"🔍 المصدر: Yahoo Finance (yfinance) مع Finnhub للقائمة والقيمة السوقية")
+    print(f"🔍 المصدر: Yahoo Finance (via requests) + Finnhub للقائمة والقيمة السوقية")
 
     await send("📊 *M60 Hunter - Yahoo Finance (بدون قوائم ثابتة)*")
 
@@ -384,18 +349,6 @@ async def main():
         
         top_100.sort(key=lambda x: (abs(x["change"]) * x["volume"]), reverse=True)
         top_40 = top_100[:40]
-        
-        # ===== إضافة Yahoo للتحقق في التداول العادي =====
-        if current_session == "regular":
-            yahoo_symbols = [s["ticker"] for s in top_40[:10]]
-            yahoo_stocks = fetch_yahoo_stocks(yahoo_symbols)
-            for y in yahoo_stocks:
-                for f in top_40:
-                    if f["ticker"] == y["ticker"]:
-                        f["close"] = y["close"]
-                        f["change"] = y["change"]
-                        f["volume"] = y["volume"]
-                        break
         
         # ===== تطبيق الشروط =====
         is_premarket = (current_session == "premarket" or current_session == "afterhours")
