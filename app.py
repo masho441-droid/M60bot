@@ -308,10 +308,11 @@ async def main():
         current_session = get_session()
         print(f"\n🔄 دورة جديدة - {current_session}")
         
-        if current_session == "closed":
-            print("⏸️ السوق مغلق. انتظار 5 دقائق...")
-            await asyncio.sleep(300)
-            continue
+        # ===== تم تعطيل شرط إغلاق السوق للتجربة =====
+        # if current_session == "closed":
+        #     print("⏸️ السوق مغلق. انتظار 5 دقائق...")
+        #     await asyncio.sleep(300)
+        #     continue
 
         # ===== جلب القائمة الكاملة =====
         all_symbols = get_symbols()
