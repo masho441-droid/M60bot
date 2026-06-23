@@ -28,7 +28,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
 # ================= ENV =================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-FINNHUB_KEY = os.getenv("FINNHUB_KEY")  # للاستخدام الاحتياطي فقط (غير مستخدم)
 
 if not TOKEN or not CHAT_ID:
     raise ValueError("Missing Telegram config")
@@ -128,15 +127,12 @@ def valid(stock, is_premarket=False):
         vol = float(stock.get("volume") or 0)
         market_cap = float(stock.get("market_cap") or 0)
 
-        # تصفية حسب الفئة السعرية
         if price < MIN_PRICE or price > MAX_PRICE:
             return False
         
-        # تصفية حسب القيمة السوقية
         if market_cap < MIN_MARKET_CAP or market_cap > MAX_MARKET_CAP:
             return False
         
-        # تصفية حسب الجلسة
         if is_premarket:
             if vol < PREMARKET_MIN_VOLUME or change < PREMARKET_MIN_MOVE:
                 return False
@@ -224,36 +220,43 @@ async def main():
     print(f"📌 الجلسة: {get_session()}")
     print(f"💰 الفئة السعرية: ${MIN_PRICE} - ${MAX_PRICE}")
     print(f"📊 القيمة السوقية: ${MIN_MARKET_CAP/1_000_000:.0f}M - ${MAX_MARKET_CAP/1_000_000:.0f}M")
-    print(f"🔍 المصدر: Yahoo Finance (yfinance) - بدون Finnhub نهائياً")
+    print(f"🔍 المصدر: Yahoo Finance (yfinance) - مع تأخير 3 ثوانٍ")
 
-    await send("📊 *M60 Hunter V9 - Yahoo Finance فقط*")
+    await send("📊 *M60 Hunter V10 - Yahoo Finance (مؤقت)*")
 
-    # قائمة تجريبية للاختبار (سيتم استبدالها بقائمة ديناميكية لاحقاً)
+    # ===== قائمة تجريبية للاختبار =====
     test_symbols = ["AAPL", "TSLA", "NVDA", "AMD", "AMZN", "MSFT", "GOOGL", "META", "NFLX", "INTC"]
     
     while True:
         current_session = get_session()
         print(f"\n🔄 دورة جديدة - {current_session}")
         
-        # ===== جلب البيانات من Yahoo Finance =====
+        # ===== جلب البيانات من Yahoo Finance مع تأخير طويل =====
         stocks = []
         
         for symbol in test_symbols:
             try:
+                logging.info(f"📡 جاري جلب {symbol}...")
                 data = get_stock_data(symbol)
                 if data:
                     stocks.append(data)
                     print(f"✅ {symbol}: ${data['close']:.2f}, {data['change']:.2f}%, حجم: {data['volume']:,}, قيمة: ${data['market_cap']/1_000_000:.1f}M")
-                await asyncio.sleep(0.5)  # انتظار نصف ثانية بين الطلبات
+                else:
+                    logging.warning(f"⚠️ {symbol}: لا توجد بيانات")
+                
+                # ===== تأخير 3 ثوانٍ بين الطلبات =====
+                await asyncio.sleep(3)
+                
             except Exception as e:
                 logging.error(f"⚠️ خطأ في {symbol}: {e}")
+                await asyncio.sleep(3)
                 continue
         
         print(f"📡 تم جلب {len(stocks)} سهماً")
         
         if not stocks:
             print("⚠️ لم يتم جلب أي أسهم، إعادة المحاولة...")
-            await asyncio.sleep(30)
+            await asyncio.sleep(60)
             continue
         
         # ===== تطبيق الشروط =====
