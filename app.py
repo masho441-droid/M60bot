@@ -9,7 +9,7 @@ import time
 from flask import Flask
 from threading import Thread
 import traceback
-from tvkit import TVClient
+from tradingview_screener import Query, Scanner
 
 # ================= FAKE WEB SERVER (for Render) =================
 web_app = Flask('')
@@ -138,13 +138,15 @@ def get_market_cap(symbol):
 def get_tradingview_quote(symbol):
     """تجلب بيانات السعر والحجم من TradingView"""
     try:
-        # إنشاء عميل TradingView
-        client = TVClient()
-        data = client.get_quote(symbol)
+        # استخدام tradingview-screener للحصول على بيانات السهم
+        scanner = Scanner()
+        query = Query().select('close', 'volume', 'change').where('symbol', '=', symbol)
+        results = scanner.execute(query)
         
-        if not data:
+        if not results or len(results) == 0:
             return None
             
+        data = results[0]
         price = data.get('close', 0)
         change = data.get('change', 0)
         volume = data.get('volume', 0)
@@ -163,7 +165,7 @@ def get_tradingview_quote(symbol):
         logging.warning(f"⚠️ [TradingView] خطأ في {symbol}: {e}")
         return None
 
-# ================= YAHOO (نسخة احتياطية للتحقق) =================
+# ================= YAHOO (نسخة احتياطية) =================
 def fetch_yahoo_stocks(symbols):
     """جلب بيانات Yahoo لرموز محددة (نسخة احتياطية)"""
     if not symbols:
