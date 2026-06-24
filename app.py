@@ -15,7 +15,7 @@ if not TOKEN or not CHAT_ID or not FINNHUB_KEY:
 bot = Bot(token=TOKEN)
 
 # ================= SETTINGS =================
-MAX_PRICE = 20
+MAX_PRICE = 10
 MIN_PRICE = 0.5
 MIN_CHANGE = 1
 
@@ -30,6 +30,7 @@ SYMBOL_CACHE_TTL = 21600  # 6 hours
 last_alert = {}
 symbol_cache = []
 last_fetch_time = 0
+daily_alerts = {}
 
 # ================= TELEGRAM =================
 async def send(msg):
@@ -75,12 +76,24 @@ def get_quote(symbol):
             return None
 
         d = r.json()
+        
+        # جلب الحجم (Volume) - بيانات تقريبية
+        volume = 0
+        try:
+            vol_url = f"https://finnhub.io/api/v1/stock/metric?symbol={symbol}&metric=all&token={FINNHUB_KEY}"
+            vol_res = requests.get(vol_url, timeout=5)
+            if vol_res.status_code == 200:
+                vol_data = vol_res.json()
+                volume = vol_data.get('metric', {}).get('volumeAvg', 0)
+        except:
+            pass
 
         return {
             "price": d.get("c", 0),
-            "change": d.get("dp", 0)
+            "change": d.get("dp", 0),
+            "volume": volume,
+            "prev_price": d.get("pc", 0)
         }
-
     except:
         return None
 
@@ -91,14 +104,32 @@ def check_signal(data):
 
     price = data["price"]
     change = data["change"]
+    volume = data.get("volume", 0)
+    prev_price = data.get("prev_price", 0)
 
     if price <= 0:
         return False
 
+    # 1. نطاق السعر
     if not (MIN_PRICE <= price <= MAX_PRICE):
         return False
 
+    # 2. الزخم (التغير السعري)
     if change < MIN_CHANGE:
+        return False
+
+    # 3. الحجم النسبي (زيادة مفاجئة في الحجم)
+    avg_volume = 50000  # متوسط وهمي، يمكن تعديله
+    relative_volume = volume / avg_volume if avg_volume > 0 else 1
+
+    # 4. تسارع السعر
+    acceleration = (price - prev_price) / prev_price if prev_price > 0 else 0
+
+    # شروط إضافية للانطلاق
+    if relative_volume < 1.5:
+        return False
+
+    if acceleration < 0.01:
         return False
 
     return True
@@ -114,10 +145,22 @@ def can_alert(symbol):
     last_alert[symbol] = now
     return True
 
-# ================= BACKGROUND LOOP (الخلفية) =================
-async def background_worker():
-    """تعمل في الخلفية بشكل مستقل"""
-    await send("🔥 M60 PRO BOT STARTED (Background Mode)")
+# ================= SUCCESS RATE =================
+def get_success_rate(change):
+    if change >= 5:
+        return 85
+    elif change >= 3:
+        return 70
+    elif change >= 1:
+        return 60
+    else:
+        return 50
+
+# ================= MAIN =================
+async def main():
+    global daily_alerts
+
+    await send("🔥 M60 PRO BOT STARTED (Enhanced)")
 
     while True:
         try:
@@ -143,12 +186,27 @@ async def background_worker():
                 data = get_quote(symbol)
 
                 if check_signal(data):
+                    # تحديث عداد التنبيهات اليومية
+                    today = time.strftime("%Y-%m-%d")
+                    if today not in daily_alerts:
+                        daily_alerts[today] = {}
+                    
+                    if symbol not in daily_alerts[today]:
+                        daily_alerts[today][symbol] = 0
+                    daily_alerts[today][symbol] += 1
+                    
+                    alert_count = daily_alerts[today][symbol]
+                    success_rate = get_success_rate(data['change'])
 
                     msg = (
-                        f"🚨 *SIGNAL ALERT*\n\n"
-                        f"📊 Ticker: `{symbol}`\n"
-                        f"💰 Price: `{data['price']}`\n"
-                        f"📈 Change: `{data['change']}%`\n"
+                        f"🚨 *تنبيه انطلاق سعري* 🚨\n\n"
+                        f"📊 الرمز: `{symbol}`\n"
+                        f"🔢 عدد التنبيهات اليوم: `{alert_count}`\n"
+                        f"📈 الزخم: `{data['change']}%`\n"
+                        f"📊 الحجم: `{data['volume']}`\n"
+                        f"💰 السيولة: `${data['price']}`\n"
+                        f"📈 نسبة نجاح الصفقة: `{success_rate}%`\n"
+                        f"🕒 الوقت: `{time.strftime('%Y-%m-%d %H:%M:%S')}`\n"
                     )
 
                     await send(msg)
@@ -161,7 +219,6 @@ async def background_worker():
             print("Main loop error:", e)
             await asyncio.sleep(30)
 
-# ================= RUN (Background Only) =================
+# ================= RUN =================
 if __name__ == "__main__":
-    # تشغيل الخلفية فقط بدون أي ويب سيرفر
-    asyncio.run(background_worker())
+    asyncio.run(main())
