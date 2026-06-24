@@ -12,7 +12,7 @@ flask_app = Flask(__name__)
 
 @flask_app.route('/')
 def home():
-    return "Market Scanner Pro is running.", 200
+    return "Ultra Fast Scanner is running.", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -26,18 +26,29 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 FINNHUB_KEY = os.getenv("FINNHUB_KEY")
 
+if not TOKEN or not CHAT_ID or not FINNHUB_KEY:
+    raise ValueError("Missing environment variables")
+
 bot = Bot(token=TOKEN)
 
-# ================= SETTINGS =================
-BATCH_SIZE = 120
-SLEEP_BATCH = 0.2
-HOT_SLEEP = 0.05
+# ================= SPEED SETTINGS =================
+SCAN_LIMIT = 60
+BASE_SLEEP = 0.25
+HOT_SCAN_SLEEP = 0.10
 COOLDOWN = 300
 
+# ================= ACCURACY SETTINGS =================
+MIN_PRICE = 0.5
+MAX_PRICE = 10
+MIN_CHANGE = 0.5
+MIN_VOLUME_RATIO = 1.2
+MIN_ACCELERATION = 0.3
+
+# ================= STATE =================
 PRICE_CACHE = {}
-LAST_ALERT = {}
-DAILY_ALERTS = {}
-HOT_LIST = set()
+VOLUME_CACHE = {}
+last_alert = {}
+daily_alerts = {}
 
 # ================= TELEGRAM =================
 async def send(msg):
@@ -46,53 +57,80 @@ async def send(msg):
     except:
         pass
 
-# ================= LOAD UNIVERSE =================
-def load_symbols():
+# ================= SYMBOLS =================
+def get_symbols():
     try:
         url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_KEY}"
-        r = requests.get(url, timeout=30)
-        data = r.json()
-        return [x["symbol"] for x in data if "symbol" in x]
+        r = requests.get(url, timeout=20)
+        return r.json()[:SCAN_LIMIT]
     except:
         return []
 
-# ================= QUOTE =================
-def get_price(symbol):
+# ================= FAST QUOTE =================
+def get_quote(symbol):
     try:
         url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_KEY}"
         r = requests.get(url, timeout=5)
+
         if r.status_code != 200:
             return None
-        return r.json().get("c", 0)
+
+        d = r.json()
+
+        return {
+            "price": d.get("c", 0),
+            "change": d.get("dp", 0),
+            "volume": d.get("v", 0),
+            "prev_close": d.get("pc", 0)
+        }
     except:
         return None
 
-# ================= MOMENTUM =================
-def detect(symbol, price):
-    if symbol not in PRICE_CACHE:
-        PRICE_CACHE[symbol] = price
-        return False
+# ================= ACCURACY CHECKS =================
+def check_accuracy(data, symbol):
+    if not data:
+        return False, 0, 0, 0
 
-    old = PRICE_CACHE[symbol]
-    PRICE_CACHE[symbol] = price
+    price = data["price"]
+    change = data["change"]
+    volume = data["volume"]
+    prev_close = data["prev_close"]
 
-    if old <= 0:
-        return False
+    # 1. نطاق السعر
+    if not (MIN_PRICE <= price <= MAX_PRICE):
+        return False, 0, 0, 0
 
-    change = ((price - old) / old) * 100
+    # 2. الزخم (التغير السعري)
+    if change < MIN_CHANGE:
+        return False, 0, 0, 0
 
-    if change >= 0.12:
-        return True
+    # 3. الحجم النسبي
+    if symbol in VOLUME_CACHE:
+        avg_volume = VOLUME_CACHE[symbol]
+        relative_volume = volume / avg_volume if avg_volume > 0 else 1
+    else:
+        relative_volume = 1
+        VOLUME_CACHE[symbol] = volume
 
-    return False
+    if relative_volume < MIN_VOLUME_RATIO:
+        return False, 0, 0, 0
+
+    # 4. تسارع السعر
+    acceleration = (price - prev_close) / prev_close * 100 if prev_close > 0 else 0
+    if acceleration < MIN_ACCELERATION:
+        return False, 0, 0, 0
+
+    return True, change, relative_volume, acceleration
 
 # ================= COOLDOWN =================
 def can_alert(symbol):
     now = time.time()
-    if symbol in LAST_ALERT:
-        if now - LAST_ALERT[symbol] < COOLDOWN:
+
+    if symbol in last_alert:
+        if now - last_alert[symbol] < COOLDOWN:
             return False
-    LAST_ALERT[symbol] = now
+
+    last_alert[symbol] = now
     return True
 
 # ================= SUCCESS RATE =================
@@ -108,76 +146,72 @@ def get_success_rate(change):
 
 # ================= MAIN ENGINE =================
 async def main():
-    global DAILY_ALERTS
+    await send("🔥 *الماسح السريع - النسخة المدمجة*")
 
-    await send("🔥 *الماسح الاحترافي - النسخة العربية*")
-
-    symbols = load_symbols()
-    index = 0
+    symbols = get_symbols()
 
     while True:
         try:
-            batch = symbols[index:index + BATCH_SIZE]
+            hot_symbols = []
 
-            if not batch:
-                index = 0
-                continue
-
-            # ================= BATCH SCAN =================
-            for sym in batch:
-                price = get_price(sym)
-                if not price:
+            # 1) scan fast
+            for item in symbols:
+                symbol = item.get("symbol")
+                if not symbol:
                     continue
 
-                if detect(sym, price):
-                    HOT_LIST.add(sym)
-
-                await asyncio.sleep(SLEEP_BATCH)
-
-            # ================= HOT LIST SCAN =================
-            for sym in list(HOT_LIST):
-                price = get_price(sym)
-                if not price:
+                data = get_quote(symbol)
+                if not data:
                     continue
 
-                if can_alert(sym):
-                    # تحديث عداد التنبيهات اليومية
-                    today = time.strftime("%Y-%m-%d")
-                    if today not in DAILY_ALERTS:
-                        DAILY_ALERTS[today] = {}
+                is_valid, change, rel_vol, accel = check_accuracy(data, symbol)
 
-                    if sym not in DAILY_ALERTS[today]:
-                        DAILY_ALERTS[today][sym] = 0
-                    DAILY_ALERTS[today][sym] += 1
+                if is_valid:
+                    hot_symbols.append((symbol, data["price"], change, rel_vol, accel))
 
-                    alert_count = DAILY_ALERTS[today][sym]
-                    change = ((price - PRICE_CACHE.get(sym, price)) / PRICE_CACHE.get(sym, price)) * 100 if PRICE_CACHE.get(sym, 0) > 0 else 0
-                    success_rate = get_success_rate(change)
+                await asyncio.sleep(BASE_SLEEP)
 
-                    msg = (
-                        f"🚨 *تنبيه انطلاق سعري* 🚨\n\n"
-                        f"📊 الرمز: `{sym}`\n"
-                        f"🔢 عدد التنبيهات اليوم: `{alert_count}`\n"
-                        f"📈 الزخم: `{change:.2f}%`\n"
-                        f"📊 الحجم: `غير متاح`\n"
-                        f"💰 السيولة: `${price}`\n"
-                        f"📈 نسبة نجاح الصفقة: `{success_rate}%`\n"
-                        f"🕒 الوقت: `{time.strftime('%Y-%m-%d %H:%M:%S')}`\n"
-                    )
+            # 2) deep scan for hot only
+            for symbol, price, change, rel_vol, accel in hot_symbols:
 
-                    await send(msg)
+                if not can_alert(symbol):
+                    continue
 
-                await asyncio.sleep(HOT_SLEEP)
+                # تحديث عداد التنبيهات اليومية
+                today = time.strftime("%Y-%m-%d")
+                if today not in daily_alerts:
+                    daily_alerts[today] = {}
 
-            # rotate universe
-            index += BATCH_SIZE
+                if symbol not in daily_alerts[today]:
+                    daily_alerts[today][symbol] = 0
+                daily_alerts[today][symbol] += 1
 
-            if index >= len(symbols):
-                index = 0
+                alert_count = daily_alerts[today][symbol]
+                success_rate = get_success_rate(change)
 
-        except Exception:
+                msg = (
+                    f"🚨 *تنبيه انطلاق سعري* 🚨\n\n"
+                    f"📊 الرمز: `{symbol}`\n"
+                    f"🔢 عدد التنبيهات اليوم: `{alert_count}`\n"
+                    f"📈 الزخم: `{change:.2f}%`\n"
+                    f"📊 الحجم النسبي: `{rel_vol:.1f}x`\n"
+                    f"🚀 التسارع: `{accel:.2f}%`\n"
+                    f"💰 السيولة: `${price}`\n"
+                    f"📈 نسبة نجاح الصفقة: `{success_rate}%`\n"
+                    f"🕒 الوقت: `{time.strftime('%Y-%m-%d %H:%M:%S')}`\n"
+                )
+
+                await send(msg)
+
+                await asyncio.sleep(HOT_SCAN_SLEEP)
+
+            # refresh symbols occasionally
+            if time.time() % 600 < 5:
+                symbols = get_symbols()
+
+        except Exception as e:
+            print("Main loop error:", e)
             await asyncio.sleep(2)
 
-# ================= RUN =================
 if __name__ == "__main__":
     asyncio.run(main())
