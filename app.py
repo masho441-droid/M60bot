@@ -4,6 +4,24 @@ import time
 import requests
 from telegram import Bot
 
+# ================= DUMMY WEB SERVER =================
+from flask import Flask
+import threading
+
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def home():
+    return "M60 Bot is running.", 200
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
+# تشغيل خادم الويب في خلفية منفصلة
+threading.Thread(target=run_web, daemon=True).start()
+# ====================================================
+
 # ================= CONFIG =================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
