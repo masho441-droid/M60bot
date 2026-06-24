@@ -1,172 +1,166 @@
 import os
 import asyncio
-import logging
-import pytz
-import requests
-from datetime import datetime, time as dt_time
-from telegram import Bot
 import time
-from flask import Flask
-from threading import Thread
+import requests
+from telegram import Bot
 
-# ================= FAKE WEB SERVER (for Render) =================
-web_app = Flask('')
-
-@web_app.route('/')
-def home():
-    return "M60bot is running!"
-
-def run_web_server():
-    web_app.run(host='0.0.0.0', port=10000)
-
-Thread(target=run_web_server, daemon=True).start()
-
-# ================= LOGGING =================
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
-
-# ================= ENV =================
+# ================= CONFIG =================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 FINNHUB_KEY = os.getenv("FINNHUB_KEY")
 
-if not TOKEN or not CHAT_ID:
-    raise ValueError("Missing Telegram config")
+if not TOKEN or not CHAT_ID or not FINNHUB_KEY:
+    raise ValueError("Missing environment variables")
 
 bot = Bot(token=TOKEN)
 
-# ================= SETTINGS (مخففة للتجربة) =================
-MIN_PRICE = 0.01
-MAX_PRICE = 10000
-MIN_MOVE = 0.01
-MIN_VOLUME = 1
-MIN_MARKET_CAP = 0
-MAX_MARKET_CAP = 10**12
+# ================= SETTINGS =================
+MAX_PRICE = 20
+MIN_PRICE = 0.5
+MIN_CHANGE = 1
 
+SCAN_LIMIT = 100
+SLEEP_BETWEEN = 0.8
+CYCLE_SLEEP = 60
+
+COOLDOWN = 900  # 15 min per stock
+SYMBOL_CACHE_TTL = 21600  # 6 hours
+
+# ================= STATE =================
 last_alert = {}
-
-# ================= TIME =================
-def ny():
-    return datetime.now(pytz.timezone("America/New_York"))
+symbol_cache = []
+last_fetch_time = 0
 
 # ================= TELEGRAM =================
 async def send(msg):
     try:
-        await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
+        await bot.send_message(
+            chat_id=CHAT_ID,
+            text=msg,
+            parse_mode="Markdown"
+        )
     except Exception as e:
-        logging.error(e)
+        print("Telegram error:", e)
 
-# ================= GET ALL SYMBOLS =================
-def get_all_symbols():
-    """جلب قائمة الرموز من Finnhub"""
+# ================= SYMBOLS =================
+def get_symbols():
+    global symbol_cache, last_fetch_time
+
+    now = time.time()
+
+    if symbol_cache and (now - last_fetch_time < SYMBOL_CACHE_TTL):
+        return symbol_cache
+
     try:
         url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_KEY}"
-        response = requests.get(url, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            if isinstance(data, list):
-                return data
-        return []
-    except Exception as e:
-        logging.error(f"خطأ في جلب القائمة: {e}")
-        return []
+        r = requests.get(url, timeout=30)
 
-# ================= CHECK STOCK =================
-def check_stock(symbol):
-    """جلب بيانات السهم وتطبيق الشروط"""
-    try:
-        # جلب البيانات
-        url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_KEY}"
-        response = requests.get(url, timeout=10)
-        
-        if response.status_code != 200:
-            return None
-            
-        data = response.json()
-        price = data.get("c", 0)
-        change = data.get("dp", 0)
-        volume = data.get("v", 0)
-        
-        if price <= 0 or volume <= 0:
-            return None
-        
-        # التحقق من الشروط المخففة
-        if price < MIN_PRICE or price > MAX_PRICE:
-            return None
-        if volume < MIN_VOLUME:
-            return None
-        if change < MIN_MOVE:
-            return None
-            
-        # جلب القيمة السوقية
-        market_cap = None
-        try:
-            profile_url = f"https://finnhub.io/api/v1/stock/profile2?symbol={symbol}&token={FINNHUB_KEY}"
-            profile_res = requests.get(profile_url, timeout=10)
-            if profile_res.status_code == 200:
-                profile_data = profile_res.json()
-                mc = profile_data.get("marketCapitalization")
-                if mc:
-                    market_cap = float(mc) * 1_000_000
-        except:
-            pass
-        
-        if market_cap and (market_cap < MIN_MARKET_CAP or market_cap > MAX_MARKET_CAP):
-            return None
-        
-        return {
-            "ticker": symbol,
-            "price": price,
-            "change": change,
-            "volume": volume,
-            "market_cap": market_cap
-        }
-        
+        if r.status_code == 200:
+            symbol_cache = r.json()
+            last_fetch_time = now
+            print(f"Loaded symbols: {len(symbol_cache)}")
+
     except Exception as e:
+        print("Symbol error:", e)
+
+    return symbol_cache
+
+# ================= QUOTE =================
+def get_quote(symbol):
+    try:
+        url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_KEY}"
+        r = requests.get(url, timeout=10)
+
+        if r.status_code != 200:
+            return None
+
+        d = r.json()
+
+        return {
+            "price": d.get("c", 0),
+            "change": d.get("dp", 0)
+        }
+
+    except:
         return None
+
+# ================= STRATEGY =================
+def check_signal(data):
+    if not data:
+        return False
+
+    price = data["price"]
+    change = data["change"]
+
+    if price <= 0:
+        return False
+
+    if not (MIN_PRICE <= price <= MAX_PRICE):
+        return False
+
+    if change < MIN_CHANGE:
+        return False
+
+    return True
+
+# ================= COOLDOWN =================
+def can_alert(symbol):
+    now = time.time()
+
+    if symbol in last_alert:
+        if now - last_alert[symbol] < COOLDOWN:
+            return False
+
+    last_alert[symbol] = now
+    return True
 
 # ================= MAIN =================
 async def main():
-    await send("🔥 *M60 Hunter - بدء العمل (وضع الاختبار)*")
-    
+
+    await send("🔥 M60 PRO BOT STARTED")
+
     while True:
         try:
-            # جلب القائمة
-            all_symbols = get_all_symbols()
-            if not all_symbols:
+            symbols = get_symbols()
+
+            if not symbols:
                 await asyncio.sleep(30)
                 continue
-            
-            # أخذ أول 50 سهم
-            symbols_to_check = all_symbols[:50]
-            logging.info(f"📡 جاري تدقيق {len(symbols_to_check)} رمزاً...")
-            
-            for item in symbols_to_check:
+
+            selected = symbols[:SCAN_LIMIT]
+
+            print(f"Scanning {len(selected)} symbols")
+
+            for item in selected:
+
                 symbol = item.get("symbol")
                 if not symbol:
                     continue
-                
-                # تأخير 1.5 ثانية
-                await asyncio.sleep(1.5)
-                
-                stock = check_stock(symbol)
-                if stock:
-                    now = ny().strftime("%H:%M:%S")
+
+                if not can_alert(symbol):
+                    continue
+
+                data = get_quote(symbol)
+
+                if check_signal(data):
+
                     msg = (
-                        f"📊 *{symbol} — {now}* 📊\n\n"
-                        f"🔹 *السعر:* `${stock['price']:.2f}`\n"
-                        f"🔹 *الارتفاع:* `+{stock['change']:.2f}%`\n"
-                        f"🔹 *الحجم:* `{stock['volume']:,}`\n"
-                        f"🔹 *القيمة السوقية:* `${stock['market_cap']/1_000_000:.1f}M`"
+                        f"🚨 *SIGNAL ALERT*\n\n"
+                        f"📊 Ticker: `{symbol}`\n"
+                        f"💰 Price: `{data['price']}`\n"
+                        f"📈 Change: `{data['change']}%`\n"
                     )
+
                     await send(msg)
-                    await asyncio.sleep(1)
-            
-            # انتظار دقيقة قبل الدورة التالية
-            await asyncio.sleep(60)
-            
+
+                await asyncio.sleep(SLEEP_BETWEEN)
+
+            await asyncio.sleep(CYCLE_SLEEP)
+
         except Exception as e:
-            logging.error(f"⚠️ خطأ في الحلقة الرئيسية: {e}")
+            print("Main loop error:", e)
             await asyncio.sleep(30)
 
+# ================= RUN =================
 if __name__ == "__main__":
     asyncio.run(main())
