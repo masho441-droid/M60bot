@@ -114,10 +114,10 @@ def can_alert(symbol):
     last_alert[symbol] = now
     return True
 
-# ================= MAIN =================
-async def main():
-
-    await send("🔥 M60 PRO BOT STARTED")
+# ================= BACKGROUND LOOP (الخلفية) =================
+async def background_worker():
+    """تعمل في الخلفية بشكل مستقل"""
+    await send("🔥 M60 PRO BOT STARTED (Background Mode)")
 
     while True:
         try:
@@ -161,6 +161,7 @@ async def main():
             print("Main loop error:", e)
             await asyncio.sleep(30)
 
-# ================= RUN =================
+# ================= RUN (Background Only) =================
 if __name__ == "__main__":
-    asyncio.run(main())
+    # تشغيل الخلفية فقط بدون أي ويب سيرفر
+    asyncio.run(background_worker())
