@@ -4,6 +4,7 @@ import time
 import requests
 import yfinance as yf
 from telegram import Bot
+from collections import deque
 
 # ================= DUMMY WEB SERVER =================
 from flask import Flask
@@ -36,17 +37,21 @@ bot = Bot(token=TOKEN)
 # ================= SETTINGS =================
 MIN_PRICE = 0.5
 MAX_PRICE = 10
-SLEEP_BATCH = 0.2
+MIN_MARKET_CAP = 10_000_000
+MAX_MARKET_CAP = 300_000_000
+SLEEP_BATCH = 0.1
 HOT_SLEEP = 0.05
 COOLDOWN = 300
-UPDATE_INTERVAL = 60
+UPDATE_INTERVAL = 60  # تحديث كل 60 ثانية
 
+# ================= STATE =================
 PRICE_CACHE = {}
 LAST_ALERT = {}
 DAILY_ALERTS = {}
 HOT_LIST = set()
 PRICES_CACHE = {}
 PRICES_CACHE_TIME = 0
+VOLUME_HISTORY = {}  # لتخزين الحجم لآخر 20 شمعة (5 دقائق)
 symbols_cache = []
 symbols_cache_time = 0
 symbols_loaded = False
@@ -58,15 +63,13 @@ async def send(msg):
     except:
         pass
 
-# ================= LOAD SYMBOLS (ONCE) =================
+# ================= LOAD SYMBOLS =================
 def load_symbols():
     global symbols_cache, symbols_cache_time, symbols_loaded
     
-    # إذا كانت القائمة محملة مسبقاً، أعدها مباشرة
     if symbols_loaded and symbols_cache:
         return symbols_cache
     
-    # محاولة Polygon أولاً
     if POLYGON_KEY:
         try:
             url = f"https://api.polygon.io/v3/reference/tickers?market=stocks&active=true&limit=1000&apiKey={POLYGON_KEY}"
@@ -81,7 +84,6 @@ def load_symbols():
         except:
             pass
     
-    # إذا فشل Polygon، استخدم Finnhub
     if FINNHUB_KEY:
         try:
             url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_KEY}"
@@ -98,67 +100,102 @@ def load_symbols():
     
     return symbols_cache
 
-# ================= FETCH PRICES =================
-def fetch_all_prices():
-    global PRICES_CACHE, PRICES_CACHE_TIME
+# ================= FETCH 5-MINUTE AGGREGATES =================
+def fetch_5min_aggs(symbol):
+    """جلب بيانات آخر شمعتين (5 دقائق) من Polygon"""
+    if not POLYGON_KEY:
+        return None
     
-    now = time.time()
-    if PRICES_CACHE and (now - PRICES_CACHE_TIME < UPDATE_INTERVAL):
-        return PRICES_CACHE
-    
-    prices = {}
-    
-    if POLYGON_KEY:
-        try:
-            today = time.strftime("%Y-%m-%d")
-            url = f"https://api.polygon.io/v2/aggs/grouped/locale/us/market/stocks/{today}?adjusted=true&apiKey={POLYGON_KEY}"
-            r = requests.get(url, timeout=10)
-            if r.status_code == 200:
-                data = r.json()
-                for item in data.get("results", []):
-                    symbol = item.get("T")
-                    price = item.get("c")
-                    if symbol and price:
-                        prices[symbol] = price
-                PRICES_CACHE = prices
-                PRICES_CACHE_TIME = now
-                print(f"Fetched {len(prices)} prices from Polygon")
-                return prices
-        except:
-            pass
-    
-    symbols = load_symbols()
-    for sym in symbols[:50]:
-        try:
-            ticker = yf.Ticker(sym)
-            data = ticker.history(period="1d")
-            if not data.empty:
-                prices[sym] = data['Close'].iloc[-1]
-        except:
-            pass
-    
-    PRICES_CACHE = prices
-    PRICES_CACHE_TIME = now
-    return prices
+    try:
+        now = int(time.time() * 1000)
+        five_min_ago = now - 300000  # 5 دقائق بالمللي ثانية
+        
+        url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/minute/{five_min_ago}/{now}?adjusted=true&sort=asc&limit=5&apiKey={POLYGON_KEY}"
+        r = requests.get(url, timeout=5)
+        
+        if r.status_code != 200:
+            return None
+        
+        data = r.json()
+        results = data.get("results", [])
+        
+        if len(results) < 2:
+            return None
+        
+        # آخر شمعتين
+        last = results[-1]
+        prev = results[-2]
+        
+        return {
+            "symbol": symbol,
+            "price": last.get("c", 0),
+            "volume": last.get("v", 0),
+            "high": last.get("h", 0),
+            "low": last.get("l", 0),
+            "prev_price": prev.get("c", 0),
+            "prev_volume": prev.get("v", 0),
+            "timestamp": last.get("t", 0)
+        }
+    except Exception as e:
+        print(f"Error fetching {symbol}: {e}")
+        return None
 
-def get_price_smart(symbol):
-    return PRICES_CACHE.get(symbol, 0)
+# ================= SMART PRICE FETCHER (مع تخزين الحجم) =================
+def get_price_with_volume(symbol):
+    global VOLUME_HISTORY
+    
+    data = fetch_5min_aggs(symbol)
+    if not data:
+        return None
+    
+    # تحديث سجل الحجم (آخر 20 شمعة)
+    if symbol not in VOLUME_HISTORY:
+        VOLUME_HISTORY[symbol] = deque(maxlen=20)
+    
+    VOLUME_HISTORY[symbol].append(data["volume"])
+    
+    # حساب الحجم النسبي (RVOL)
+    avg_volume = sum(VOLUME_HISTORY[symbol]) / len(VOLUME_HISTORY[symbol]) if VOLUME_HISTORY[symbol] else 1
+    rvol = data["volume"] / avg_volume if avg_volume > 0 else 1
+    
+    # حساب التسارع (الزخم - الزخم السابق)
+    prev_price = data["prev_price"]
+    current_price = data["price"]
+    if prev_price > 0:
+        momentum = ((current_price - prev_price) / prev_price) * 100
+    else:
+        momentum = 0
+    
+    return {
+        "symbol": symbol,
+        "price": current_price,
+        "volume": data["volume"],
+        "rvol": rvol,
+        "momentum": momentum,
+        "timestamp": data["timestamp"]
+    }
 
-# ================= MOMENTUM =================
-def detect(symbol, price):
+# ================= DETECT =================
+def detect(symbol, price, momentum, rvol):
     if symbol not in PRICE_CACHE:
-        PRICE_CACHE[symbol] = {"previous": price, "current": price}
+        PRICE_CACHE[symbol] = {"previous": price, "current": price, "momentum": momentum}
         return False
 
     previous = PRICE_CACHE[symbol]["current"]
     PRICE_CACHE[symbol]["previous"] = previous
     PRICE_CACHE[symbol]["current"] = price
+    PRICE_CACHE[symbol]["momentum"] = momentum
 
     if previous <= 0:
         return False
 
     change = ((price - previous) / previous) * 100
-    return change >= 0.12
+    
+    # شروط الزخم: تغير ≥ 0.12% وحجم نسبي ≥ 1.2
+    if change >= 0.12 and rvol >= 1.2:
+        return True
+    
+    return False
 
 # ================= COOLDOWN =================
 def can_alert(symbol):
@@ -170,60 +207,83 @@ def can_alert(symbol):
     return True
 
 # ================= SIGNAL SCORE =================
-def get_signal_score(change):
-    if change >= 5: return 85
-    elif change >= 3: return 70
-    elif change >= 1: return 60
-    elif change >= 0.5: return 50
-    else: return 40
+def get_signal_score(change, rvol):
+    score = 0
+    if change >= 5:
+        score += 40
+    elif change >= 3:
+        score += 30
+    elif change >= 1:
+        score += 20
+    elif change >= 0.5:
+        score += 10
+    
+    if rvol >= 3:
+        score += 30
+    elif rvol >= 2:
+        score += 20
+    elif rvol >= 1.5:
+        score += 10
+    
+    return min(score, 100)
 
 # ================= MAIN ENGINE =================
 async def main():
     global DAILY_ALERTS
 
-    await send("🔥 *الماسح الذكي - تحميل الأسهم مرة واحدة*")
+    await send("🔥 *الماسح الذكي - 5 دقائق + تسارع + RVOL*")
 
     symbols = load_symbols()
     if not symbols:
-        await send("⚠️ لم يتم العثور على أسهم. تحقق من المفتاح.")
+        await send("⚠️ لم يتم العثور على أسهم.")
         return
 
     while True:
         try:
-            all_prices = fetch_all_prices()
-            if not all_prices:
-                await asyncio.sleep(10)
-                continue
-
+            print(f"فحص {len(symbols[:500])} سهماً...")
+            
             for sym in symbols[:500]:
-                price = all_prices.get(sym, 0)
-                if not price:
+                data = get_price_with_volume(sym)
+                if not data:
                     continue
+                
+                price = data["price"]
+                momentum = data["momentum"]
+                rvol = data["rvol"]
+                
                 if price < MIN_PRICE or price > MAX_PRICE:
                     continue
-                if detect(sym, price):
+                
+                if detect(sym, price, momentum, rvol):
                     HOT_LIST.add(sym)
+                
                 await asyncio.sleep(SLEEP_BATCH)
 
             for sym in list(HOT_LIST):
-                price = all_prices.get(sym, 0)
-                if not price:
+                data = get_price_with_volume(sym)
+                if not data:
                     continue
+                
+                price = data["price"]
+                momentum = data["momentum"]
+                rvol = data["rvol"]
+                
                 if can_alert(sym):
                     today = time.strftime("%Y-%m-%d")
                     if today not in DAILY_ALERTS:
                         DAILY_ALERTS[today] = {}
                     DAILY_ALERTS[today][sym] = DAILY_ALERTS[today].get(sym, 0) + 1
 
-                    previous = PRICE_CACHE[sym]["previous"]
-                    change = ((price - previous) / previous) * 100 if previous > 0 else 0
-                    signal_score = get_signal_score(change)
+                    change = ((price - PRICE_CACHE[sym]["previous"]) / PRICE_CACHE[sym]["previous"]) * 100 if PRICE_CACHE[sym]["previous"] > 0 else 0
+                    signal_score = get_signal_score(change, rvol)
 
                     msg = (
                         f"🚨 *إشارة زخم جديدة* 🚨\n\n"
                         f"📊 الرمز: `{sym}`\n"
                         f"💰 السعر: `${price:.2f}`\n"
-                        f"📈 التغير القصير: `+{change:.2f}%`\n"
+                        f"📈 الزخم: `{change:+.2f}%`\n"
+                        f"📊 RVOL: `{rvol:.1f}x`\n"
+                        f"🚀 التسارع: `{momentum:+.2f}%`\n"
                         f"🔥 قوة الإشارة: `{signal_score}/100`\n"
                         f"🔢 التنبيه رقم: `{DAILY_ALERTS[today][sym]}`\n"
                         f"🕒 الوقت: `{time.strftime('%H:%M:%S')} EST`\n\n"
@@ -238,7 +298,7 @@ async def main():
             if len(PRICE_CACHE) > 10000:
                 PRICE_CACHE.clear()
 
-            await asyncio.sleep(5)
+            await asyncio.sleep(UPDATE_INTERVAL)
 
         except Exception as e:
             print(f"Main loop error: {e}")
