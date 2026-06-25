@@ -10,6 +10,7 @@ from flask import Flask
 import threading
 
 flask_app = Flask(__name__)
+
 @flask_app.route('/')
 def home():
     return "Smart Scanner is running.", 200
@@ -46,6 +47,9 @@ DAILY_ALERTS = {}
 HOT_LIST = set()
 PRICES_CACHE = {}
 PRICES_CACHE_TIME = 0
+symbols_cache = []
+symbols_cache_time = 0
+symbols_loaded = False
 
 # ================= TELEGRAM =================
 async def send(msg):
@@ -54,51 +58,47 @@ async def send(msg):
     except:
         pass
 
-# ================= LOAD SYMBOLS (USING POLYGON) =================
-def load_symbols_polygon():
-    if not POLYGON_KEY:
-        return None
-    try:
-        url = f"https://api.polygon.io/v3/reference/tickers?market=stocks&active=true&limit=1000&apiKey={POLYGON_KEY}"
-        r = requests.get(url, timeout=15)
-        if r.status_code != 200:
-            print(f"Polygon error: {r.status_code}")
-            return None
-        data = r.json()
-        return [x["ticker"] for x in data.get("results", []) if "ticker" in x]
-    except Exception as e:
-        print(f"Polygon load error: {e}")
-        return None
-
-# ================= LOAD SYMBOLS (FINNHUB FALLBACK) =================
-def load_symbols_finnhub():
-    if not FINNHUB_KEY:
-        return None
-    try:
-        url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_KEY}"
-        r = requests.get(url, timeout=15)
-        if r.status_code != 200:
-            return None
-        data = r.json()
-        return [x["symbol"] for x in data if "symbol" in x]
-    except:
-        return None
-
+# ================= LOAD SYMBOLS (ONCE) =================
 def load_symbols():
-    symbols = load_symbols_polygon()
-    if symbols:
-        asyncio.create_task(send(f"✅ *تم تحميل {len(symbols)} سهم من Polygon*"))
-        return symbols
+    global symbols_cache, symbols_cache_time, symbols_loaded
     
-    symbols = load_symbols_finnhub()
-    if symbols:
-        asyncio.create_task(send(f"✅ *تم تحميل {len(symbols)} سهم من Finnhub (احتياطي)*"))
-        return symbols
+    # إذا كانت القائمة محملة مسبقاً، أعدها مباشرة
+    if symbols_loaded and symbols_cache:
+        return symbols_cache
     
-    asyncio.create_task(send("❌ *فشل تحميل الأسهم من جميع المصادر*"))
-    return []
+    # محاولة Polygon أولاً
+    if POLYGON_KEY:
+        try:
+            url = f"https://api.polygon.io/v3/reference/tickers?market=stocks&active=true&limit=1000&apiKey={POLYGON_KEY}"
+            r = requests.get(url, timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                symbols_cache = [x["ticker"] for x in data.get("results", []) if "ticker" in x]
+                symbols_loaded = True
+                symbols_cache_time = time.time()
+                asyncio.create_task(send(f"✅ *تم تحميل {len(symbols_cache)} سهم من Polygon*"))
+                return symbols_cache
+        except:
+            pass
+    
+    # إذا فشل Polygon، استخدم Finnhub
+    if FINNHUB_KEY:
+        try:
+            url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_KEY}"
+            r = requests.get(url, timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                symbols_cache = [x["symbol"] for x in data if "symbol" in x]
+                symbols_loaded = True
+                symbols_cache_time = time.time()
+                asyncio.create_task(send(f"✅ *تم تحميل {len(symbols_cache)} سهم من Finnhub*"))
+                return symbols_cache
+        except:
+            pass
+    
+    return symbols_cache
 
-# ================= FETCH PRICES (POLYGON BATCH) =================
+# ================= FETCH PRICES =================
 def fetch_all_prices():
     global PRICES_CACHE, PRICES_CACHE_TIME
     
@@ -108,7 +108,6 @@ def fetch_all_prices():
     
     prices = {}
     
-    # 1. Polygon Aggregates (طلب واحد لكل الأسهم)
     if POLYGON_KEY:
         try:
             today = time.strftime("%Y-%m-%d")
@@ -128,7 +127,6 @@ def fetch_all_prices():
         except:
             pass
     
-    # 2. Yahoo Finance (بدون مفتاح)
     symbols = load_symbols()
     for sym in symbols[:50]:
         try:
@@ -143,7 +141,6 @@ def fetch_all_prices():
     PRICES_CACHE_TIME = now
     return prices
 
-# ================= SMART PRICE GETTER =================
 def get_price_smart(symbol):
     return PRICES_CACHE.get(symbol, 0)
 
@@ -184,7 +181,7 @@ def get_signal_score(change):
 async def main():
     global DAILY_ALERTS
 
-    await send("🔥 *الماسح الذكي - Polygon + Yahoo (بدون Finnhub)*")
+    await send("🔥 *الماسح الذكي - تحميل الأسهم مرة واحدة*")
 
     symbols = load_symbols()
     if not symbols:
