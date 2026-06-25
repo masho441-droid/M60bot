@@ -37,21 +37,17 @@ bot = Bot(token=TOKEN)
 # ================= SETTINGS =================
 MIN_PRICE = 0.5
 MAX_PRICE = 10
-MIN_MARKET_CAP = 10_000_000
-MAX_MARKET_CAP = 300_000_000
 SLEEP_BATCH = 0.1
 HOT_SLEEP = 0.05
 COOLDOWN = 300
-UPDATE_INTERVAL = 60  # تحديث كل 60 ثانية
+UPDATE_INTERVAL = 60
 
 # ================= STATE =================
 PRICE_CACHE = {}
 LAST_ALERT = {}
 DAILY_ALERTS = {}
 HOT_LIST = set()
-PRICES_CACHE = {}
-PRICES_CACHE_TIME = 0
-VOLUME_HISTORY = {}  # لتخزين الحجم لآخر 20 شمعة (5 دقائق)
+VOLUME_HISTORY = {}
 symbols_cache = []
 symbols_cache_time = 0
 symbols_loaded = False
@@ -78,7 +74,6 @@ def load_symbols():
                 data = r.json()
                 symbols_cache = [x["ticker"] for x in data.get("results", []) if "ticker" in x]
                 symbols_loaded = True
-                symbols_cache_time = time.time()
                 asyncio.create_task(send(f"✅ *تم تحميل {len(symbols_cache)} سهم من Polygon*"))
                 return symbols_cache
         except:
@@ -92,7 +87,6 @@ def load_symbols():
                 data = r.json()
                 symbols_cache = [x["symbol"] for x in data if "symbol" in x]
                 symbols_loaded = True
-                symbols_cache_time = time.time()
                 asyncio.create_task(send(f"✅ *تم تحميل {len(symbols_cache)} سهم من Finnhub*"))
                 return symbols_cache
         except:
@@ -102,13 +96,12 @@ def load_symbols():
 
 # ================= FETCH 5-MINUTE AGGREGATES =================
 def fetch_5min_aggs(symbol):
-    """جلب بيانات آخر شمعتين (5 دقائق) من Polygon"""
     if not POLYGON_KEY:
         return None
     
     try:
         now = int(time.time() * 1000)
-        five_min_ago = now - 300000  # 5 دقائق بالمللي ثانية
+        five_min_ago = now - 300000
         
         url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/minute/{five_min_ago}/{now}?adjusted=true&sort=asc&limit=5&apiKey={POLYGON_KEY}"
         r = requests.get(url, timeout=5)
@@ -122,7 +115,6 @@ def fetch_5min_aggs(symbol):
         if len(results) < 2:
             return None
         
-        # آخر شمعتين
         last = results[-1]
         prev = results[-2]
         
@@ -130,17 +122,13 @@ def fetch_5min_aggs(symbol):
             "symbol": symbol,
             "price": last.get("c", 0),
             "volume": last.get("v", 0),
-            "high": last.get("h", 0),
-            "low": last.get("l", 0),
             "prev_price": prev.get("c", 0),
             "prev_volume": prev.get("v", 0),
-            "timestamp": last.get("t", 0)
         }
-    except Exception as e:
-        print(f"Error fetching {symbol}: {e}")
+    except:
         return None
 
-# ================= SMART PRICE FETCHER (مع تخزين الحجم) =================
+# ================= SMART PRICE FETCHER =================
 def get_price_with_volume(symbol):
     global VOLUME_HISTORY
     
@@ -148,50 +136,46 @@ def get_price_with_volume(symbol):
     if not data:
         return None
     
-    # تحديث سجل الحجم (آخر 20 شمعة)
+    # تجاهل الأسهم ذات السعر صفر (غير نشطة)
+    if data["price"] <= 0:
+        return None
+    
     if symbol not in VOLUME_HISTORY:
         VOLUME_HISTORY[symbol] = deque(maxlen=20)
     
     VOLUME_HISTORY[symbol].append(data["volume"])
     
-    # حساب الحجم النسبي (RVOL)
     avg_volume = sum(VOLUME_HISTORY[symbol]) / len(VOLUME_HISTORY[symbol]) if VOLUME_HISTORY[symbol] else 1
     rvol = data["volume"] / avg_volume if avg_volume > 0 else 1
     
-    # حساب التسارع (الزخم - الزخم السابق)
-    prev_price = data["prev_price"]
-    current_price = data["price"]
-    if prev_price > 0:
-        momentum = ((current_price - prev_price) / prev_price) * 100
+    if data["prev_price"] > 0:
+        momentum = ((data["price"] - data["prev_price"]) / data["prev_price"]) * 100
     else:
         momentum = 0
     
     return {
         "symbol": symbol,
-        "price": current_price,
+        "price": data["price"],
         "volume": data["volume"],
         "rvol": rvol,
         "momentum": momentum,
-        "timestamp": data["timestamp"]
     }
 
 # ================= DETECT =================
 def detect(symbol, price, momentum, rvol):
     if symbol not in PRICE_CACHE:
-        PRICE_CACHE[symbol] = {"previous": price, "current": price, "momentum": momentum}
+        PRICE_CACHE[symbol] = {"previous": price, "current": price}
         return False
 
     previous = PRICE_CACHE[symbol]["current"]
     PRICE_CACHE[symbol]["previous"] = previous
     PRICE_CACHE[symbol]["current"] = price
-    PRICE_CACHE[symbol]["momentum"] = momentum
 
     if previous <= 0:
         return False
 
     change = ((price - previous) / previous) * 100
     
-    # شروط الزخم: تغير ≥ 0.12% وحجم نسبي ≥ 1.2
     if change >= 0.12 and rvol >= 1.2:
         return True
     
