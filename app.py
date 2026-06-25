@@ -2,6 +2,7 @@ import os
 import asyncio
 import time
 import requests
+import yfinance as yf
 from telegram import Bot
 
 # ================= DUMMY WEB SERVER =================
@@ -9,7 +10,6 @@ from flask import Flask
 import threading
 
 flask_app = Flask(__name__)
-
 @flask_app.route('/')
 def home():
     return "Smart Scanner is running.", 200
@@ -24,8 +24,8 @@ threading.Thread(target=run_web, daemon=True).start()
 # ================= CONFIG =================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-FINNHUB_KEY = os.getenv("FINNHUB_KEY")
 POLYGON_KEY = os.getenv("POLYGON_KEY")
+FINNHUB_KEY = os.getenv("FINNHUB_KEY")
 
 if not TOKEN or not CHAT_ID:
     raise ValueError("Missing TELEGRAM_TOKEN or CHAT_ID")
@@ -35,22 +35,17 @@ bot = Bot(token=TOKEN)
 # ================= SETTINGS =================
 MIN_PRICE = 0.5
 MAX_PRICE = 10
-MIN_MARKET_CAP = 10_000_000
-MAX_MARKET_CAP = 300_000_000
 SLEEP_BATCH = 0.2
 HOT_SLEEP = 0.05
 COOLDOWN = 300
-UPDATE_INTERVAL = 60  # تحديث البيانات كل 60 ثانية
+UPDATE_INTERVAL = 60
 
-# ================= CACHE =================
-symbols_cache = []
-symbols_cache_time = 0
-prices_cache = {}
-prices_cache_time = 0
-PRICE_HISTORY = {}
+PRICE_CACHE = {}
 LAST_ALERT = {}
 DAILY_ALERTS = {}
 HOT_LIST = set()
+PRICES_CACHE = {}
+PRICES_CACHE_TIME = 0
 
 # ================= TELEGRAM =================
 async def send(msg):
@@ -59,41 +54,61 @@ async def send(msg):
     except:
         pass
 
-# ================= LOAD SYMBOLS (مرة كل 6 ساعات) =================
-def load_symbols():
-    global symbols_cache, symbols_cache_time
-    
-    now = time.time()
-    if symbols_cache and (now - symbols_cache_time < 21600):  # 6 ساعات
-        return symbols_cache
-    
+# ================= LOAD SYMBOLS (USING POLYGON) =================
+def load_symbols_polygon():
+    if not POLYGON_KEY:
+        return None
+    try:
+        url = f"https://api.polygon.io/v3/reference/tickers?market=stocks&active=true&limit=1000&apiKey={POLYGON_KEY}"
+        r = requests.get(url, timeout=15)
+        if r.status_code != 200:
+            print(f"Polygon error: {r.status_code}")
+            return None
+        data = r.json()
+        return [x["ticker"] for x in data.get("results", []) if "ticker" in x]
+    except Exception as e:
+        print(f"Polygon load error: {e}")
+        return None
+
+# ================= LOAD SYMBOLS (FINNHUB FALLBACK) =================
+def load_symbols_finnhub():
     if not FINNHUB_KEY:
-        return []
-    
+        return None
     try:
         url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_KEY}"
         r = requests.get(url, timeout=15)
         if r.status_code != 200:
-            return symbols_cache
+            return None
         data = r.json()
-        symbols_cache = [x["symbol"] for x in data if "symbol" in x]
-        symbols_cache_time = now
-        asyncio.create_task(send(f"✅ *تم تحميل {len(symbols_cache)} سهم من Finnhub*"))
-        return symbols_cache
+        return [x["symbol"] for x in data if "symbol" in x]
     except:
-        return symbols_cache
+        return None
 
-# ================= FETCH ALL PRICES (طلب واحد مجمع) =================
+def load_symbols():
+    symbols = load_symbols_polygon()
+    if symbols:
+        asyncio.create_task(send(f"✅ *تم تحميل {len(symbols)} سهم من Polygon*"))
+        return symbols
+    
+    symbols = load_symbols_finnhub()
+    if symbols:
+        asyncio.create_task(send(f"✅ *تم تحميل {len(symbols)} سهم من Finnhub (احتياطي)*"))
+        return symbols
+    
+    asyncio.create_task(send("❌ *فشل تحميل الأسهم من جميع المصادر*"))
+    return []
+
+# ================= FETCH PRICES (POLYGON BATCH) =================
 def fetch_all_prices():
-    global prices_cache, prices_cache_time
+    global PRICES_CACHE, PRICES_CACHE_TIME
     
     now = time.time()
-    if prices_cache and (now - prices_cache_time < UPDATE_INTERVAL):
-        return prices_cache
+    if PRICES_CACHE and (now - PRICES_CACHE_TIME < UPDATE_INTERVAL):
+        return PRICES_CACHE
     
     prices = {}
     
-    # 1. محاولة Polygon (طلب واحد مجمع)
+    # 1. Polygon Aggregates (طلب واحد لكل الأسهم)
     if POLYGON_KEY:
         try:
             today = time.strftime("%Y-%m-%d")
@@ -106,48 +121,41 @@ def fetch_all_prices():
                     price = item.get("c")
                     if symbol and price:
                         prices[symbol] = price
-                prices_cache = prices
-                prices_cache_time = now
-                print(f"Fetched {len(prices)} prices from Polygon (1 request)")
+                PRICES_CACHE = prices
+                PRICES_CACHE_TIME = now
+                print(f"Fetched {len(prices)} prices from Polygon")
                 return prices
         except:
             pass
     
-    # 2. إذا فشل Polygon، استخدم Finnhub (لكل سهم على حدة - استهلاك أعلى)
-    if FINNHUB_KEY:
-        symbols = load_symbols()
-        count = 0
-        for sym in symbols[:100]:  # حد أقصى 100 سهم لتجنب استهلاك كبير
-            try:
-                url = f"https://finnhub.io/api/v1/quote?symbol={sym}&token={FINNHUB_KEY}"
-                r = requests.get(url, timeout=3)
-                if r.status_code == 200:
-                    price = r.json().get("c", 0)
-                    if price > 0:
-                        prices[sym] = price
-                        count += 1
-                await asyncio.sleep(0.1)  # تجنب تجاوز الحد
-            except:
-                pass
-        print(f"Fetched {count} prices from Finnhub (fallback)")
+    # 2. Yahoo Finance (بدون مفتاح)
+    symbols = load_symbols()
+    for sym in symbols[:50]:
+        try:
+            ticker = yf.Ticker(sym)
+            data = ticker.history(period="1d")
+            if not data.empty:
+                prices[sym] = data['Close'].iloc[-1]
+        except:
+            pass
     
-    prices_cache = prices
-    prices_cache_time = now
+    PRICES_CACHE = prices
+    PRICES_CACHE_TIME = now
     return prices
 
-# ================= SMART PRICE GETTER (من الكاش) =================
+# ================= SMART PRICE GETTER =================
 def get_price_smart(symbol):
-    return prices_cache.get(symbol, 0)
+    return PRICES_CACHE.get(symbol, 0)
 
-# ================= MOMENTUM DETECTOR =================
+# ================= MOMENTUM =================
 def detect(symbol, price):
-    if symbol not in PRICE_HISTORY:
-        PRICE_HISTORY[symbol] = {"previous": price, "current": price}
+    if symbol not in PRICE_CACHE:
+        PRICE_CACHE[symbol] = {"previous": price, "current": price}
         return False
 
-    previous = PRICE_HISTORY[symbol]["current"]
-    PRICE_HISTORY[symbol]["previous"] = previous
-    PRICE_HISTORY[symbol]["current"] = price
+    previous = PRICE_CACHE[symbol]["current"]
+    PRICE_CACHE[symbol]["previous"] = previous
+    PRICE_CACHE[symbol]["current"] = price
 
     if previous <= 0:
         return False
@@ -176,7 +184,7 @@ def get_signal_score(change):
 async def main():
     global DAILY_ALERTS
 
-    await send("🔥 *الماسح الذكي - دمج المصادر مع تخزين مؤقت*")
+    await send("🔥 *الماسح الذكي - Polygon + Yahoo (بدون Finnhub)*")
 
     symbols = load_symbols()
     if not symbols:
@@ -185,40 +193,32 @@ async def main():
 
     while True:
         try:
-            # 1. جلب جميع الأسعار دفعة واحدة (طلب واحد)
             all_prices = fetch_all_prices()
-            
             if not all_prices:
                 await asyncio.sleep(10)
                 continue
 
-            # 2. فحص جميع الأسهم
-            for sym in symbols[:500]:  # حد أقصى 500 سهم لكل دورة
+            for sym in symbols[:500]:
                 price = all_prices.get(sym, 0)
                 if not price:
                     continue
-
                 if price < MIN_PRICE or price > MAX_PRICE:
                     continue
-
                 if detect(sym, price):
                     HOT_LIST.add(sym)
-
                 await asyncio.sleep(SLEEP_BATCH)
 
-            # 3. فحص الأسهم الساخنة
             for sym in list(HOT_LIST):
                 price = all_prices.get(sym, 0)
                 if not price:
                     continue
-
                 if can_alert(sym):
                     today = time.strftime("%Y-%m-%d")
                     if today not in DAILY_ALERTS:
                         DAILY_ALERTS[today] = {}
                     DAILY_ALERTS[today][sym] = DAILY_ALERTS[today].get(sym, 0) + 1
 
-                    previous = PRICE_HISTORY[sym]["previous"]
+                    previous = PRICE_CACHE[sym]["previous"]
                     change = ((price - previous) / previous) * 100 if previous > 0 else 0
                     signal_score = get_signal_score(change)
 
@@ -238,16 +238,14 @@ async def main():
 
                 await asyncio.sleep(HOT_SLEEP)
 
-            # منع تضخم الذاكرة
-            if len(PRICE_HISTORY) > 10000:
-                PRICE_HISTORY.clear()
+            if len(PRICE_CACHE) > 10000:
+                PRICE_CACHE.clear()
 
-            await asyncio.sleep(5)  # انتظار قصير بين الدورات
+            await asyncio.sleep(5)
 
         except Exception as e:
             print(f"Main loop error: {e}")
             await asyncio.sleep(10)
 
-# ================= RUN =================
 if __name__ == "__main__":
     asyncio.run(main())
