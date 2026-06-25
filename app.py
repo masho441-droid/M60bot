@@ -24,15 +24,18 @@ threading.Thread(target=run_web, daemon=True).start()
 # ================= CONFIG =================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-POLYGON_KEY = os.getenv("POLYGON_KEY")
+POLYGON_KEY = os.getenv("POLYGON_KEY", "cr5n9nujPulQqkLwnqpszcON1jh")
 
-if not TOKEN or not CHAT_ID or not POLYGON_KEY:
-    raise ValueError("Missing environment variables")
+if not TOKEN or not CHAT_ID:
+    raise ValueError("Missing TELEGRAM_TOKEN or CHAT_ID")
 
 bot = Bot(token=TOKEN)
 
 # ================= SETTINGS =================
-BATCH_SIZE = 120
+MIN_PRICE = 0.5
+MAX_PRICE = 10
+MIN_MARKET_CAP = 10_000_000   # 10 مليون
+MAX_MARKET_CAP = 300_000_000  # 300 مليون
 SLEEP_BATCH = 0.2
 HOT_SLEEP = 0.05
 COOLDOWN = 300
@@ -49,30 +52,46 @@ async def send(msg):
     except:
         pass
 
-# ================= LOAD UNIVERSE =================
-def load_symbols():
+# ================= LOAD SYMBOLS WITH FILTERS =================
+def load_symbols_with_filters():
+    """جلب الأسهم التي تطابق شروط السعر والقيمة السوقية"""
     try:
+        # 1. جلب جميع الأسهم
         url = f"https://api.polygon.io/v3/reference/tickers?market=stocks&active=true&limit=1000&apiKey={POLYGON_KEY}"
         r = requests.get(url, timeout=30)
         data = r.json()
-        return [x["ticker"] for x in data.get("results", [])]
-    except:
+        all_tickers = data.get("results", [])
+
+        filtered_symbols = []
+        for ticker in all_tickers:
+            # 2. فلترة حسب القيمة السوقية
+            market_cap = ticker.get("market_cap", 0)
+            if market_cap < MIN_MARKET_CAP or market_cap > MAX_MARKET_CAP:
+                continue
+            filtered_symbols.append(ticker["ticker"])
+
+        print(f"Loaded {len(filtered_symbols)} symbols after filtering")
+        return filtered_symbols
+
+    except Exception as e:
+        print(f"Error loading symbols: {e}")
         return []
 
-# ================= QUOTE =================
-def get_price(symbol):
+# ================= FETCH ALL PRICES (ONE REQUEST) =================
+def fetch_all_prices():
+    """جلب بيانات جميع الأسهم في طلب واحد"""
+    today = time.strftime("%Y-%m-%d")
+    url = f"https://api.polygon.io/v2/aggs/grouped/locale/us/market/stocks/{today}?adjusted=true&apiKey={POLYGON_KEY}"
     try:
-        url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/prev?adjusted=true&apiKey={POLYGON_KEY}"
-        r = requests.get(url, timeout=5)
+        r = requests.get(url, timeout=30)
         if r.status_code != 200:
-            return None
+            return {}
         data = r.json()
         results = data.get("results", [])
-        if results:
-            return results[0].get("c", 0)  # سعر الإغلاق
-        return None
+        # بناء قاموس: {الرمز: السعر}
+        return {item["T"]: item["c"] for item in results if "c" in item}
     except:
-        return None
+        return {}
 
 # ================= MOMENTUM =================
 def detect(symbol, price):
@@ -117,23 +136,29 @@ def get_success_rate(change):
 async def main():
     global DAILY_ALERTS
 
-    await send("🔥 *الماسح باستخدام Polygon*")
+    await send("🔥 *الماسح الشامل (Polygon) - فلتر السعر والقيمة السوقية*")
 
-    symbols = load_symbols()
-    index = 0
+    symbols = load_symbols_with_filters()
+    if not symbols:
+        await send("⚠️ لم يتم العثور على أسهم تطابق الفلتر. تحقق من المفتاح أو الإعدادات.")
+        return
 
     while True:
         try:
-            batch = symbols[index:index + BATCH_SIZE]
-
-            if not batch:
-                index = 0
+            # 1. جلب بيانات جميع الأسهم دفعة واحدة
+            all_prices = fetch_all_prices()
+            if not all_prices:
+                await asyncio.sleep(60)
                 continue
 
-            # ================= BATCH SCAN =================
-            for sym in batch:
-                price = get_price(sym)
+            # 2. فحص جميع الأسهم
+            for sym in symbols:
+                price = all_prices.get(sym)
                 if not price:
+                    continue
+
+                # فلترة السعر
+                if price < MIN_PRICE or price > MAX_PRICE:
                     continue
 
                 if detect(sym, price):
@@ -141,9 +166,9 @@ async def main():
 
                 await asyncio.sleep(SLEEP_BATCH)
 
-            # ================= HOT LIST SCAN =================
+            # 3. فحص الأسهم الساخنة
             for sym in list(HOT_LIST):
-                price = get_price(sym)
+                price = all_prices.get(sym)
                 if not price:
                     continue
 
@@ -166,7 +191,7 @@ async def main():
                         f"🔢 عدد التنبيهات اليوم: `{alert_count}`\n"
                         f"📈 الزخم: `{change:.2f}%`\n"
                         f"📊 الحجم: `غير متاح`\n"
-                        f"💰 السيولة: `${price}`\n"
+                        f"💰 السعر: `${price:.2f}`\n"
                         f"📈 نسبة نجاح الصفقة: `{success_rate}%`\n"
                         f"🕒 الوقت: `{time.strftime('%Y-%m-%d %H:%M:%S')}`\n"
                     )
@@ -175,13 +200,12 @@ async def main():
 
                 await asyncio.sleep(HOT_SLEEP)
 
-            index += BATCH_SIZE
+            # تحديث القائمة كل ساعة
+            await asyncio.sleep(3600)
 
-            if index >= len(symbols):
-                index = 0
-
-        except Exception:
-            await asyncio.sleep(2)
+        except Exception as e:
+            print(f"Main loop error: {e}")
+            await asyncio.sleep(60)
 
 # ================= RUN =================
 if __name__ == "__main__":
