@@ -58,9 +58,6 @@ SLEEP_BETWEEN = 0.10
 
 COOLDOWN = 300
 
-# كانت 60
-# تسبب أن الأسعار لا تتغير
-
 UPDATE_INTERVAL = 10
 
 BATCH_SIZE = 100
@@ -97,7 +94,9 @@ async def send(msg):
             parse_mode="Markdown"
         )
     except Exception as e:
-        print(f"[Telegram Error] {e}")# ================= SOURCE 1: ITICK =================
+        print(f"[Telegram Error] {e}")
+
+# ================= SOURCE 1: ITICK =================
 
 def fetch_symbols_itick():
     """تحميل قائمة الأسهم من iTick"""
@@ -246,7 +245,77 @@ def fetch_prices_itick(symbols):
 
     print(f"[OK] Prices received: {len(prices)}")
 
-    return prices# ================= SIGNAL SCORE =================
+    return prices
+
+# ================= LOAD SYMBOLS =================
+
+def load_symbols():
+    global symbols_cache, symbols_loaded
+
+    if symbols_loaded and symbols_cache:
+        return symbols_cache
+
+    symbols = fetch_symbols_itick()
+
+    if symbols:
+        symbols_loaded = True
+        symbols_cache = symbols
+        asyncio.create_task(send(f"✅ *تم تحميل {len(symbols)} سهم من iTick*"))
+        return symbols
+
+    # احتياطي: قائمة أساسية لتشغيل البوت
+    fallback = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META"]
+    asyncio.create_task(send(f"⚠️ *استخدام القائمة الاحتياطية ({len(fallback)} سهم)*"))
+    symbols_cache = fallback
+    symbols_loaded = True
+    return fallback
+
+# ================= FETCH PRICES =================
+
+def fetch_prices(symbols):
+    global PRICES_CACHE, PRICES_CACHE_TIME
+    
+    now = time.time()
+    if PRICES_CACHE and (now - PRICES_CACHE_TIME < UPDATE_INTERVAL):
+        return PRICES_CACHE
+    
+    prices = fetch_prices_itick(symbols)
+    
+    if prices:
+        PRICES_CACHE = prices
+        PRICES_CACHE_TIME = now
+        return prices
+    
+    return {}
+
+# ================= MOMENTUM DETECTOR =================
+
+def detect(symbol, price):
+    if symbol not in PRICE_CACHE:
+        PRICE_CACHE[symbol] = {"previous": price, "current": price}
+        return False
+
+    previous = PRICE_CACHE[symbol]["current"]
+    PRICE_CACHE[symbol]["previous"] = previous
+    PRICE_CACHE[symbol]["current"] = price
+
+    if previous <= 0:
+        return False
+
+    change = ((price - previous) / previous) * 100
+    return change >= 0.12
+
+# ================= COOLDOWN =================
+
+def can_alert(symbol):
+    now = time.time()
+    if symbol in LAST_ALERT:
+        if now - LAST_ALERT[symbol] < COOLDOWN:
+            return False
+    LAST_ALERT[symbol] = now
+    return True
+
+# ================= SIGNAL SCORE =================
 
 def get_signal_score(change):
     if change >= 5:
@@ -258,7 +327,6 @@ def get_signal_score(change):
     elif change >= 0.5:
         return 50
     return 40
-
 
 # ================= MAIN ENGINE =================
 
