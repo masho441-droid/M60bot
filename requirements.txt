@@ -1,4 +1,3 @@
-python-telegram-bot
-requests
+aiohttp
 flask
-yfinance
+python-telegram-bot
