@@ -25,19 +25,21 @@ threading.Thread(target=run_web, daemon=True).start()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 ITICK_TOKEN = os.getenv("ITICK_TOKEN")
+FINNHUB_KEY = os.getenv("FINNHUB_KEY")
 
-if not TOKEN or not CHAT_ID or not ITICK_TOKEN:
-    raise ValueError("Missing TELEGRAM_TOKEN, CHAT_ID, or ITICK_TOKEN")
+if not TOKEN or not CHAT_ID:
+    raise ValueError("Missing TELEGRAM_TOKEN or CHAT_ID")
 
 bot = Bot(token=TOKEN)
 
 # ================= SETTINGS =================
 MIN_PRICE = 0.5
 MAX_PRICE = 10
-MIN_VOLUME = 100000  # الحد الأدنى للحجم (للتأكد من وجود سيولة)
-SLEEP_BETWEEN = 0.2
+MIN_VOLUME = 100000
+SLEEP_BETWEEN = 0.15
 COOLDOWN = 300
 UPDATE_INTERVAL = 60
+BATCH_SIZE = 100
 
 PRICE_CACHE = {}
 LAST_ALERT = {}
@@ -45,6 +47,9 @@ DAILY_ALERTS = {}
 HOT_LIST = set()
 PRICES_CACHE = {}
 PRICES_CACHE_TIME = 0
+symbols_cache = []
+symbols_cache_time = 0
+symbols_loaded = False
 
 # ================= TELEGRAM =================
 async def send(msg):
@@ -53,46 +58,44 @@ async def send(msg):
     except:
         pass
 
-# ================= FETCH SYMBOLS (iTick) =================
-def fetch_symbols():
-    """جلب قائمة الأسهم النشطة من iTick (أول 1000 سهم)"""
+# ================= SOURCE 1: ITICK =================
+def fetch_symbols_itick():
+    """جلب قائمة الأسهم من iTick (نقطة النهاية الصحيحة)"""
+    if not ITICK_TOKEN:
+        return None
     try:
-        url = "https://api.itick.org/stock/symbols"
+        url = "https://api.itick.org/symbol/list"
         headers = {"accept": "application/json", "token": ITICK_TOKEN}
-        params = {"region": "US", "limit": 1000}
+        params = {"type": "stock", "region": "US", "limit": 1000}
         r = requests.get(url, headers=headers, params=params, timeout=15)
         if r.status_code == 200:
             data = r.json()
             if data.get("code") == 0:
-                symbols = [item["symbol"] for item in data.get("data", []) if "symbol" in item]
-                print(f"Loaded {len(symbols)} symbols from iTick")
-                return symbols
+                symbols = []
+                for item in data.get("data", []):
+                    symbol = item.get("symbol") or item.get("code")
+                    if symbol:
+                        symbols.append(symbol)
+                if symbols:
+                    print(f"Loaded {len(symbols)} symbols from iTick")
+                    return symbols
         print(f"iTick symbol error: {r.status_code}")
     except Exception as e:
-        print(f"iTick symbol exception: {e}")
-    return []
+        print(f"iTick exception: {e}")
+    return None
 
-# ================= FETCH ALL PRICES (iTick) =================
-def fetch_all_prices(symbols):
-    """جلب بيانات جميع الأسهم في طلب واحد (Quotes)"""
-    global PRICES_CACHE, PRICES_CACHE_TIME
-    
-    now = time.time()
-    if PRICES_CACHE and (now - PRICES_CACHE_TIME < UPDATE_INTERVAL):
-        return PRICES_CACHE
+def fetch_prices_itick(symbols):
+    """جلب بيانات الأسعار من iTick (دفعات)"""
+    if not ITICK_TOKEN or not symbols:
+        return {}
     
     prices = {}
+    url = "https://api.itick.org/stock/quotes"
+    headers = {"accept": "application/json", "token": ITICK_TOKEN}
     
-    if not symbols:
-        return prices
-    
-    # تقسيم القائمة إلى دفعات (لتجنب تجاوز الحد)
-    batch_size = 100
-    for i in range(0, len(symbols), batch_size):
-        batch = symbols[i:i+batch_size]
+    for i in range(0, len(symbols), BATCH_SIZE):
+        batch = symbols[i:i+BATCH_SIZE]
         try:
-            url = "https://api.itick.org/stock/quotes"
-            headers = {"accept": "application/json", "token": ITICK_TOKEN}
             params = {"region": "US", "codes": ",".join(batch)}
             r = requests.get(url, headers=headers, params=params, timeout=10)
             if r.status_code == 200:
@@ -104,16 +107,91 @@ def fetch_all_prices(symbols):
                         volume = info.get("v", 0)
                         if price > 0:
                             prices[symbol] = {"price": price, "volume": volume}
-            await asyncio.sleep(0.5)  # لتجنب تجاوز الحد
+            time.sleep(0.3)
         except Exception as e:
-            print(f"Batch error: {e}")
-    
-    PRICES_CACHE = prices
-    PRICES_CACHE_TIME = now
-    print(f"Fetched {len(prices)} prices from iTick")
+            print(f"iTick batch error: {e}")
     return prices
 
-# ================= MOMENTUM DETECTOR =================
+# ================= SOURCE 2: FINNHUB (احتياطي) =================
+def fetch_symbols_finnhub():
+    if not FINNHUB_KEY:
+        return None
+    try:
+        url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_KEY}"
+        r = requests.get(url, timeout=15)
+        if r.status_code == 200:
+            symbols = [x["symbol"] for x in r.json() if "symbol" in x]
+            print(f"Loaded {len(symbols)} symbols from Finnhub")
+            return symbols
+    except:
+        pass
+    return None
+
+def fetch_prices_finnhub(symbols):
+    prices = {}
+    for sym in symbols[:100]:
+        try:
+            url = f"https://finnhub.io/api/v1/quote?symbol={sym}&token={FINNHUB_KEY}"
+            r = requests.get(url, timeout=3)
+            if r.status_code == 200:
+                data = r.json()
+                price = data.get("c", 0)
+                volume = data.get("v", 0)
+                if price > 0:
+                    prices[sym] = {"price": price, "volume": volume}
+            time.sleep(0.1)
+        except:
+            pass
+    return prices
+
+# ================= SMART LOADER =================
+def load_symbols():
+    global symbols_cache, symbols_cache_time, symbols_loaded
+    
+    if symbols_loaded and symbols_cache:
+        return symbols_cache
+    
+    symbols = fetch_symbols_itick()
+    if symbols:
+        symbols_loaded = True
+        symbols_cache = symbols
+        symbols_cache_time = time.time()
+        asyncio.create_task(send(f"✅ *تم تحميل {len(symbols)} سهم من iTick*"))
+        return symbols
+    
+    symbols = fetch_symbols_finnhub()
+    if symbols:
+        symbols_loaded = True
+        symbols_cache = symbols
+        symbols_cache_time = time.time()
+        asyncio.create_task(send(f"✅ *تم تحميل {len(symbols)} سهم من Finnhub (احتياطي)*"))
+        return symbols
+    
+    return []
+
+# ================= SMART PRICE FETCHER =================
+def fetch_prices(symbols):
+    global PRICES_CACHE, PRICES_CACHE_TIME
+    
+    now = time.time()
+    if PRICES_CACHE and (now - PRICES_CACHE_TIME < UPDATE_INTERVAL):
+        return PRICES_CACHE
+    
+    prices = fetch_prices_itick(symbols)
+    if prices:
+        PRICES_CACHE = prices
+        PRICES_CACHE_TIME = now
+        return prices
+    
+    prices = fetch_prices_finnhub(symbols)
+    if prices:
+        PRICES_CACHE = prices
+        PRICES_CACHE_TIME = now
+        return prices
+    
+    return {}
+
+# ================= MOMENTUM =================
 def detect(symbol, price):
     if symbol not in PRICE_CACHE:
         PRICE_CACHE[symbol] = {"previous": price, "current": price}
@@ -150,18 +228,16 @@ def get_signal_score(change):
 async def main():
     global DAILY_ALERTS
 
-    await send("🔥 *الماسح الذكي - iTick*")
+    await send("🔥 *الماسح الذكي - iTick + Finnhub*")
 
-    symbols = fetch_symbols()
+    symbols = load_symbols()
     if not symbols:
-        await send("⚠️ لم يتم العثور على أسهم. تحقق من المفتاح.")
+        await send("⚠️ لم يتم العثور على أسهم. تحقق من المفاتيح.")
         return
-
-    await send(f"✅ *تم تحميل {len(symbols)} سهم من iTick*")
 
     while True:
         try:
-            all_prices = fetch_all_prices(symbols)
+            all_prices = fetch_prices(symbols)
             if not all_prices:
                 await asyncio.sleep(10)
                 continue
@@ -171,7 +247,7 @@ async def main():
                 if not data:
                     continue
                 price = data["price"]
-                volume = data["volume"]
+                volume = data.get("volume", 0)
 
                 if price < MIN_PRICE or price > MAX_PRICE:
                     continue
