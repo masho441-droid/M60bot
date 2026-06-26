@@ -1,10 +1,11 @@
 import os
 import asyncio
 import time
-import requests
+import aiohttp
 import threading
 from flask import Flask
 from telegram import Bot
+from telegram.error import RetryAfter, TelegramError
 
 # ================= DUMMY WEB SERVER =================
 
@@ -30,7 +31,6 @@ threading.Thread(target=run_web, daemon=True).start()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 ITICK_TOKEN = os.getenv("ITICK_TOKEN")
-FINNHUB_KEY = os.getenv("FINNHUB_KEY")
 
 if not TOKEN:
     raise ValueError("Missing TELEGRAM_TOKEN")
@@ -40,13 +40,8 @@ if not CHAT_ID:
 
 bot = Bot(token=TOKEN)
 
-# ================= HTTP SESSION =================
-
-session = requests.Session()
-
-session.headers.update({
-    "User-Agent": "iTickScanner/2.0"
-})
+# سيتم تهيئة الجلسة داخل الدالة الرئيسية (main) لتفادي أخطاء Asyncio
+http_session = None 
 
 # ================= SETTINGS =================
 
@@ -54,7 +49,7 @@ MIN_PRICE = 0.5
 MAX_PRICE = 10
 MIN_VOLUME = 100000
 
-SLEEP_BETWEEN = 0.10
+SLEEP_BETWEEN = 0.05  # تقليل مدة الانتظار لأن الكود أصبح غير متزامن
 
 COOLDOWN = 300
 
@@ -69,19 +64,12 @@ MAX_RETRIES = 3
 # ================= CACHE =================
 
 PRICE_CACHE = {}
-
 LAST_ALERT = {}
-
 DAILY_ALERTS = {}
-
 HOT_LIST = set()
-
 PRICES_CACHE = {}
-
 PRICES_CACHE_TIME = 0
-
 symbols_cache = []
-
 symbols_loaded = False
 
 # ================= TELEGRAM =================
@@ -93,14 +81,18 @@ async def send(msg):
             text=msg,
             parse_mode="Markdown"
         )
-    except Exception as e:
+    except RetryAfter as e:
+        print(f"[Telegram Rate Limit] Sleeping for {e.retry_after} seconds.")
+        await asyncio.sleep(e.retry_after)
+    except TelegramError as e:
         print(f"[Telegram Error] {e}")
+    except Exception as e:
+        print(f"[Unexpected Error in Telegram] {e}")
 
 # ================= SOURCE 1: ITICK =================
 
-def fetch_symbols_itick():
-    """تحميل قائمة الأسهم من iTick"""
-
+async def fetch_symbols_itick():
+    """تحميل قائمة الأسهم من iTick بشكل غير متزامن"""
     if not ITICK_TOKEN:
         print("ITICK_TOKEN not found.")
         return None
@@ -110,7 +102,6 @@ def fetch_symbols_itick():
         "accept": "application/json",
         "token": ITICK_TOKEN
     }
-
     params = {
         "type": "stock",
         "region": "US",
@@ -119,167 +110,126 @@ def fetch_symbols_itick():
 
     for attempt in range(MAX_RETRIES):
         try:
-            r = session.get(
-                url,
-                headers=headers,
-                params=params,
-                timeout=REQUEST_TIMEOUT
-            )
+            async with http_session.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT) as r:
+                if r.status != 200:
+                    print(f"iTick Symbols HTTP {r.status}")
+                    await asyncio.sleep(2)
+                    continue
 
-            if r.status_code != 200:
-                print(f"iTick Symbols HTTP {r.status_code}")
-                time.sleep(2)
-                continue
+                data = await r.json()
 
-            data = r.json()
+                if data.get("code") != 0:
+                    print("iTick returned error:", data)
+                    return None
 
-            if data.get("code") != 0:
-                print("iTick returned error:", data)
-                return None
+                symbols = []
+                for item in data.get("data", []):
+                    symbol = item.get("symbol") or item.get("code")
+                    if symbol:
+                        symbols.append(symbol)
 
-            symbols = []
-
-            for item in data.get("data", []):
-
-                symbol = (
-                    item.get("symbol")
-                    or item.get("code")
-                )
-
-                if symbol:
-                    symbols.append(symbol)
-
-            if symbols:
-                print(f"[OK] Loaded {len(symbols)} symbols")
-                return symbols
+                if symbols:
+                    print(f"[OK] Loaded {len(symbols)} symbols")
+                    return symbols
 
         except Exception as e:
             print(f"fetch_symbols_itick(): {e}")
-            time.sleep(2)
+            await asyncio.sleep(2)
 
     return None
 
-
-def fetch_prices_itick(symbols):
-    """تحميل الأسعار الحالية من iTick"""
-
+async def fetch_prices_itick(symbols):
+    """تحميل الأسعار الحالية من iTick بشكل غير متزامن"""
     if not ITICK_TOKEN or not symbols:
         return {}
 
     prices = {}
-
     url = "https://api.itick.org/stock/quotes"
-
     headers = {
         "accept": "application/json",
         "token": ITICK_TOKEN
     }
 
-    total_batches = (
-        len(symbols) + BATCH_SIZE - 1
-    ) // BATCH_SIZE
+    total_batches = (len(symbols) + BATCH_SIZE - 1) // BATCH_SIZE
 
-    for batch_no, i in enumerate(
-        range(0, len(symbols), BATCH_SIZE),
-        start=1
-    ):
-
+    for batch_no, i in enumerate(range(0, len(symbols), BATCH_SIZE), start=1):
         batch = symbols[i:i + BATCH_SIZE]
 
         for attempt in range(MAX_RETRIES):
-
             try:
-
                 params = {
                     "region": "US",
                     "codes": ",".join(batch)
                 }
 
-                r = session.get(
-                    url,
-                    headers=headers,
-                    params=params,
-                    timeout=REQUEST_TIMEOUT
-                )
+                async with http_session.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT) as r:
+                    if r.status == 429:
+                        print("Rate limit... waiting")
+                        await asyncio.sleep(5)
+                        continue
 
-                if r.status_code == 429:
-                    print("Rate limit... waiting")
-                    time.sleep(5)
-                    continue
+                    if r.status != 200:
+                        print(f"Batch HTTP {r.status}")
+                        break
 
-                if r.status_code != 200:
-                    print(f"Batch HTTP {r.status_code}")
+                    data = await r.json()
+
+                    if data.get("code") != 0:
+                        break
+
+                    quotes = data.get("data", {})
+                    for symbol, info in quotes.items():
+                        price = float(info.get("ld", 0))
+                        volume = int(info.get("v", 0))
+
+                        if price > 0:
+                            prices[symbol] = {
+                                "price": price,
+                                "volume": volume
+                            }
                     break
-
-                data = r.json()
-
-                if data.get("code") != 0:
-                    break
-
-                quotes = data.get("data", {})
-
-                for symbol, info in quotes.items():
-
-                    price = float(info.get("ld", 0))
-
-                    volume = int(info.get("v", 0))
-
-                    if price > 0:
-
-                        prices[symbol] = {
-                            "price": price,
-                            "volume": volume
-                        }
-
-                break
 
             except Exception as e:
+                print(f"Batch {batch_no}/{total_batches}: {e}")
+                await asyncio.sleep(2)
 
-                print(
-                    f"Batch {batch_no}/{total_batches}: {e}"
-                )
-
-                time.sleep(2)
-
-        time.sleep(0.20)
+        await asyncio.sleep(0.20)
 
     print(f"[OK] Prices received: {len(prices)}")
-
     return prices
 
 # ================= LOAD SYMBOLS =================
 
-def load_symbols():
+async def load_symbols():
     global symbols_cache, symbols_loaded
 
     if symbols_loaded and symbols_cache:
         return symbols_cache
 
-    symbols = fetch_symbols_itick()
+    symbols = await fetch_symbols_itick()
 
     if symbols:
         symbols_loaded = True
         symbols_cache = symbols
-        asyncio.create_task(send(f"✅ *تم تحميل {len(symbols)} سهم من iTick*"))
+        await send(f"✅ *تم تحميل {len(symbols)} سهم من iTick*")
         return symbols
 
-    # احتياطي: قائمة أساسية لتشغيل البوت
     fallback = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META"]
-    asyncio.create_task(send(f"⚠️ *استخدام القائمة الاحتياطية ({len(fallback)} سهم)*"))
+    await send(f"⚠️ *استخدام القائمة الاحتياطية ({len(fallback)} سهم)*")
     symbols_cache = fallback
     symbols_loaded = True
     return fallback
 
 # ================= FETCH PRICES =================
 
-def fetch_prices(symbols):
+async def fetch_prices(symbols):
     global PRICES_CACHE, PRICES_CACHE_TIME
     
     now = time.time()
     if PRICES_CACHE and (now - PRICES_CACHE_TIME < UPDATE_INTERVAL):
         return PRICES_CACHE
     
-    prices = fetch_prices_itick(symbols)
+    prices = await fetch_prices_itick(symbols)
     
     if prices:
         PRICES_CACHE = prices
@@ -331,126 +281,123 @@ def get_signal_score(change):
 # ================= MAIN ENGINE =================
 
 async def main():
-    global DAILY_ALERTS
+    global DAILY_ALERTS, http_session
+    
+    # تهيئة جلسة الاتصال بشكل غير متزامن
+    http_session = aiohttp.ClientSession(headers={"User-Agent": "iTickScanner/3.0"})
 
     await send("🔥 *الماسح الذكي بدأ العمل*")
 
-    symbols = load_symbols()
+    symbols = await load_symbols()
 
     if not symbols:
         await send("❌ لم يتم تحميل قائمة الأسهم.")
+        await http_session.close()
         return
 
     print(f"Scanner started with {len(symbols)} symbols.")
 
-    while True:
+    try:
+        while True:
+            try:
+                all_prices = await fetch_prices(symbols)
 
-        try:
+                if not all_prices:
+                    print("No prices received.")
+                    await asyncio.sleep(10)
+                    continue
 
-            all_prices = fetch_prices(symbols)
+                scanned = 0
+                detected = 0
 
-            if not all_prices:
-                print("No prices received.")
+                # فحص جميع الأسهم بدون اقتطاع
+                for sym in symbols:
+                    data = all_prices.get(sym)
+
+                    if not data:
+                        continue
+
+                    price = data["price"]
+                    volume = data.get("volume", 0)
+
+                    if not (MIN_PRICE <= price <= MAX_PRICE):
+                        continue
+
+                    if volume < MIN_VOLUME:
+                        continue
+
+                    scanned += 1
+
+                    if detect(sym, price):
+                        HOT_LIST.add(sym)
+                        detected += 1
+
+                    await asyncio.sleep(0)  # تفريغ المعالج للسماح بمهام أخرى
+
+                print(f"Scanned={scanned}  Hot={len(HOT_LIST)}  Detected={detected}")
+
+                # معالجة القائمة الساخنة
+                for sym in list(HOT_LIST):
+                    # إزالة السهم من القائمة فوراً لتفادي تعليقه في حال لم يجتز الشروط القادمة
+                    HOT_LIST.discard(sym)
+                    
+                    data = all_prices.get(sym)
+
+                    if not data:
+                        continue
+
+                    if not can_alert(sym):
+                        continue
+
+                    price = data["price"]
+                    previous = PRICE_CACHE[sym]["previous"]
+
+                    if previous <= 0:
+                        continue
+
+                    change = ((price - previous) / previous) * 100
+                    score = get_signal_score(change)
+
+                    today = time.strftime("%Y-%m-%d")
+
+                    if today not in DAILY_ALERTS:
+                        DAILY_ALERTS[today] = {}
+
+                    DAILY_ALERTS[today][sym] = DAILY_ALERTS[today].get(sym, 0) + 1
+
+                    message = (
+                        "🚨 *إشارة زخم جديدة* 🚨\n\n"
+                        f"📊 الرمز: `{sym}`\n"
+                        f"💰 السعر: `${price:.2f}`\n"
+                        f"📈 التغير: `+{change:.2f}%`\n"
+                        f"🔥 القوة: `{score}/100`\n"
+                        f"🔢 رقم التنبيه: `{DAILY_ALERTS[today][sym]}`\n"
+                        f"🕒 {time.strftime('%H:%M:%S')}\n\n"
+                        "⚠️ ليست توصية استثمارية."
+                    )
+
+                    await send(message)
+                    await asyncio.sleep(0.3)  # راحة صغيرة لتيليجرام بين الرسائل
+
+                # تم إزالة تفريغ الـ PRICE_CACHE لأنه صغير ولتجنب فقدان تسلسل الأسعار
+                # أما LAST_ALERT فيمكن تنظيفه للحفاظ على الذاكرة إن أردت (اختياري)
+                if len(LAST_ALERT) > 3000:
+                    now = time.time()
+                    # مسح التنبيهات التي انتهت فترة التبريد الخاصة بها فقط
+                    expired = [k for k, v in LAST_ALERT.items() if now - v > COOLDOWN]
+                    for k in expired:
+                        del LAST_ALERT[k]
+
+                await asyncio.sleep(5)
+
+            except Exception as e:
+                print(f"MAIN LOOP ERROR: {e}")
                 await asyncio.sleep(10)
-                continue
 
-            scanned = 0
-            detected = 0
-
-            for sym in symbols[:500]:
-
-                data = all_prices.get(sym)
-
-                if not data:
-                    continue
-
-                price = data["price"]
-                volume = data.get("volume", 0)
-
-                if not (MIN_PRICE <= price <= MAX_PRICE):
-                    continue
-
-                if volume < MIN_VOLUME:
-                    continue
-
-                scanned += 1
-
-                if detect(sym, price):
-                    HOT_LIST.add(sym)
-                    detected += 1
-
-                await asyncio.sleep(SLEEP_BETWEEN)
-
-            print(
-                f"Scanned={scanned}  "
-                f"Hot={len(HOT_LIST)}  "
-                f"Detected={detected}"
-            )
-
-            for sym in list(HOT_LIST):
-
-                data = all_prices.get(sym)
-
-                if not data:
-                    HOT_LIST.discard(sym)
-                    continue
-
-                if not can_alert(sym):
-                    continue
-
-                price = data["price"]
-
-                previous = PRICE_CACHE[sym]["previous"]
-
-                if previous <= 0:
-                    HOT_LIST.discard(sym)
-                    continue
-
-                change = ((price - previous) / previous) * 100
-
-                score = get_signal_score(change)
-
-                today = time.strftime("%Y-%m-%d")
-
-                if today not in DAILY_ALERTS:
-                    DAILY_ALERTS[today] = {}
-
-                DAILY_ALERTS[today][sym] = (
-                    DAILY_ALERTS[today].get(sym, 0) + 1
-                )
-
-                message = (
-                    "🚨 *إشارة زخم جديدة* 🚨\n\n"
-                    f"📊 الرمز: `{sym}`\n"
-                    f"💰 السعر: `${price:.2f}`\n"
-                    f"📈 التغير: `+{change:.2f}%`\n"
-                    f"🔥 القوة: `{score}/100`\n"
-                    f"🔢 رقم التنبيه: `{DAILY_ALERTS[today][sym]}`\n"
-                    f"🕒 {time.strftime('%H:%M:%S')}\n\n"
-                    "⚠️ ليست توصية استثمارية."
-                )
-
-                await send(message)
-
-                HOT_LIST.discard(sym)
-
-                await asyncio.sleep(0.3)
-
-            if len(PRICE_CACHE) > 3000:
-                PRICE_CACHE.clear()
-                print("PRICE_CACHE cleared.")
-
-            if len(LAST_ALERT) > 3000:
-                LAST_ALERT.clear()
-
-            await asyncio.sleep(5)
-
-        except Exception as e:
-
-            print(f"MAIN LOOP ERROR: {e}")
-
-            await asyncio.sleep(10)
-
+    finally:
+        # إغلاق الجلسة بأمان في حال توقف السكربت
+        await http_session.close()
 
 if __name__ == "__main__":
+    # تأكد من تثبيت aiohttp عبر: pip install aiohttp
     asyncio.run(main())
