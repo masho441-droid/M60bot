@@ -1,3 +1,4 @@
 aiohttp
 flask
 python-telegram-bot
+websockets
