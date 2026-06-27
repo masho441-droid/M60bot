@@ -1,4 +1,4 @@
-aiohttp
-flask
 python-telegram-bot
+requests
+flask
 websockets
