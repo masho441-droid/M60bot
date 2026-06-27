@@ -13,7 +13,7 @@ flask_app = Flask(__name__)
 
 @flask_app.route("/")
 def home():
-    return "iTick WebSocket Scanner is running.", 200
+    return "iTick Scanner is running.", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -26,9 +26,10 @@ threading.Thread(target=run_web, daemon=True).start()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 ITICK_TOKEN = os.getenv("ITICK_TOKEN")
+FINNHUB_KEY = os.getenv("FINNHUB_KEY")
 
-if not TOKEN or not CHAT_ID or not ITICK_TOKEN:
-    raise ValueError("Missing TELEGRAM_TOKEN, CHAT_ID, or ITICK_TOKEN")
+if not TOKEN or not CHAT_ID:
+    raise ValueError("Missing TELEGRAM_TOKEN or CHAT_ID")
 
 bot = Bot(token=TOKEN)
 
@@ -43,6 +44,8 @@ PRICE_CACHE = {}
 LAST_ALERT = {}
 DAILY_ALERTS = {}
 HOT_SYMBOLS = []
+symbols_loaded = False
+symbols_sent = False
 
 # ================= TELEGRAM =================
 async def send(msg):
@@ -84,68 +87,78 @@ def detect(symbol, price):
     change = ((price - previous) / previous) * 100
     return change >= 0.12
 
-# ================= FETCH TOP SYMBOLS (REST) =================
-def fetch_top_symbols():
-    """جلب أعلى 500 سهم نشاطاً"""
-    try:
-        # 1. جلب قائمة جميع الأسهم
-        url = "https://api.itick.org/symbol/list"
-        headers = {"accept": "application/json", "token": ITICK_TOKEN}
-        params = {"type": "stock", "region": "US", "limit": 1000}
-        r = requests.get(url, headers=headers, params=params, timeout=15)
-        
-        if r.status_code != 200:
-            print(f"REST error: {r.status_code}")
-            return []
-        
-        data = r.json()
-        symbols = []
-        for item in data.get("data", []):
-            symbol = item.get("symbol") or item.get("code")
-            if symbol:
-                symbols.append(symbol)
-        
-        # 2. جلب بيانات الحجم للفرز
-        volumes = {}
-        for i in range(0, len(symbols), 100):
-            batch = symbols[i:i+100]
-            try:
-                url2 = "https://api.itick.org/stock/quotes"
-                params2 = {"region": "US", "codes": ",".join(batch)}
-                r2 = requests.get(url2, headers=headers, params=params2, timeout=10)
-                if r2.status_code == 200:
-                    data2 = r2.json()
-                    for sym, info in data2.get("data", {}).items():
-                        volumes[sym] = info.get("v", 0)
-                time.sleep(0.3)
-            except:
-                pass
-        
-        # 3. ترتيب حسب الحجم (الأعلى أولاً)
-        sorted_symbols = sorted(volumes.items(), key=lambda x: x[1], reverse=True)
-        top = [sym for sym, vol in sorted_symbols[:TOP_SYMBOLS]]
-        
-        print(f"[OK] Top {len(top)} symbols fetched")
-        return top
-        
-    except Exception as e:
-        print(f"Fetch top symbols error: {e}")
-        return []
+# ================= LOAD SYMBOLS (ONCE) =================
+def load_symbols():
+    global HOT_SYMBOLS, symbols_loaded, symbols_sent
+    
+    if symbols_loaded and HOT_SYMBOLS:
+        return HOT_SYMBOLS
+    
+    # محاولة iTick أولاً
+    if ITICK_TOKEN:
+        try:
+            url = "https://api.itick.org/symbol/list"
+            headers = {"accept": "application/json", "token": ITICK_TOKEN}
+            params = {"type": "stock", "region": "US", "limit": 1000}
+            r = requests.get(url, headers=headers, params=params, timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                symbols = []
+                for item in data.get("data", []):
+                    symbol = item.get("symbol") or item.get("code")
+                    if symbol:
+                        symbols.append(symbol)
+                if symbols:
+                    HOT_SYMBOLS = symbols[:TOP_SYMBOLS]
+                    symbols_loaded = True
+                    if not symbols_sent:
+                        asyncio.create_task(send(f"✅ *تم تحميل {len(HOT_SYMBOLS)} سهم من iTick*"))
+                        symbols_sent = True
+                    return HOT_SYMBOLS
+        except Exception as e:
+            print(f"iTick error: {e}")
+    
+    # محاولة Finnhub
+    if FINNHUB_KEY:
+        try:
+            url = f"https://finnhub.io/api/v1/stock/symbol?exchange=US&token={FINNHUB_KEY}"
+            r = requests.get(url, timeout=15)
+            if r.status_code == 200:
+                symbols = [x["symbol"] for x in r.json() if "symbol" in x]
+                if symbols:
+                    HOT_SYMBOLS = symbols[:TOP_SYMBOLS]
+                    symbols_loaded = True
+                    if not symbols_sent:
+                        asyncio.create_task(send(f"✅ *تم تحميل {len(HOT_SYMBOLS)} سهم من Finnhub*"))
+                        symbols_sent = True
+                    return HOT_SYMBOLS
+        except:
+            pass
+    
+    # قائمة احتياطية أساسية
+    if not symbols_loaded:
+        HOT_SYMBOLS = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META", "AMD", "INTC", "NFLX"]
+        symbols_loaded = True
+        if not symbols_sent:
+            asyncio.create_task(send(f"⚠️ *استخدام القائمة الاحتياطية ({len(HOT_SYMBOLS)} سهم)*"))
+            symbols_sent = True
+    
+    return HOT_SYMBOLS
 
 # ================= WEBSOCKET HANDLER =================
 async def itick_websocket():
     global HOT_SYMBOLS
     
-    # جلب أعلى 500 سهم قبل بدء WebSocket
-    HOT_SYMBOLS = fetch_top_symbols()
+    # تحميل القائمة (مرة واحدة)
     if not HOT_SYMBOLS:
-        await send("⚠️ لم يتم العثور على أسهم. تحقق من المفتاح.")
+        HOT_SYMBOLS = load_symbols()
+    
+    if not HOT_SYMBOLS:
+        await asyncio.sleep(30)
         return
     
-    await send(f"✅ *تم تحميل {len(HOT_SYMBOLS)} سهم نشط*")
-    
     # تحويل الرموز إلى صيغة iTick
-    symbols_param = ",".join([f"{sym}$US" for sym in HOT_SYMBOLS])
+    symbols_param = ",".join([f"{sym}$US" for sym in HOT_SYMBOLS[:500]])
     
     uri = "wss://api.itick.org/stock"
     headers = {"token": ITICK_TOKEN}
@@ -178,7 +191,6 @@ async def process_websocket_data(data):
     symbol = data.get("symbol")
     price = data.get("price") or data.get("ld")
     volume = data.get("volume") or data.get("v")
-    change = data.get("change") or data.get("chp")
     
     if not symbol or not price:
         return
@@ -217,6 +229,9 @@ async def process_websocket_data(data):
 async def main():
     await send("🔥 *الماسح الفوري (WebSocket) يعمل*")
     print("🚀 بدء تشغيل WebSocket...")
+    
+    # تحميل القائمة مرة واحدة قبل الدخول في الحلقة
+    load_symbols()
     
     while True:
         try:
