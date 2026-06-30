@@ -2,19 +2,19 @@ import os
 import asyncio
 import time
 import json
-import websockets
 import aiohttp
 from telegram import Bot
 from flask import Flask
 import threading
-from collections import deque
+from datetime import datetime
+import pytz
 
 # ================= DUMMY WEB SERVER =================
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
 def home():
-    return "iTick WebSocket Scanner is running.", 200
+    return "M60 Golden Cross Surge is running.", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -26,23 +26,24 @@ threading.Thread(target=run_web, daemon=True).start()
 # ================= CONFIG =================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-ITICK_TOKEN = os.getenv("ITICK_TOKEN")
 
-if not TOKEN or not CHAT_ID or not ITICK_TOKEN:
-    raise ValueError("Missing TELEGRAM_TOKEN, CHAT_ID, or ITICK_TOKEN")
+if not TOKEN or not CHAT_ID:
+    raise ValueError("Missing TELEGRAM_TOKEN or CHAT_ID")
 
 bot = Bot(token=TOKEN)
 
 # ================= SETTINGS =================
-MIN_VOLUME = 50000
-MIN_MOMENTUM = 1.5
-MIN_ACCELERATION = 0.3
-MIN_VOLUME_SPIKE = 1.5
+MIN_PRICE = 2.0
+MAX_PRICE = 10.0
+MIN_MARKET_CAP = 100_000_000
+MAX_MARKET_CAP = 2_000_000_000
+MIN_VOLUME_10D = 500_000
+VOLUME_SPIKE_MIN = 1.5
+MIN_RSI = 35
+MAX_RSI = 65
 
 # ================= CACHE =================
-PRICE_CACHE = {}
-VOLUME_CACHE = {}
-LAST_ALERT = {}
+ALERT_HISTORY = {}
 DAILY_ALERTS = {}
 
 # ================= TELEGRAM =================
@@ -52,163 +53,142 @@ async def send(msg):
     except Exception as e:
         print(f"[Telegram Error] {e}")
 
-# ================= SIGNAL SCORE =================
-def get_signal_score(momentum, acceleration, volume_spike):
-    score = 0
-    if momentum >= 5: score += 35
-    elif momentum >= 3: score += 25
-    elif momentum >= 1.5: score += 15
-    if acceleration >= 1.5: score += 30
-    elif acceleration >= 1.0: score += 20
-    elif acceleration >= 0.3: score += 10
-    if volume_spike >= 4.0: score += 35
-    elif volume_spike >= 3.0: score += 25
-    elif volume_spike >= 1.5: score += 15
-    return min(score, 100)
-
-def can_alert(symbol):
-    now = time.time()
-    if symbol in LAST_ALERT:
-        if now - LAST_ALERT[symbol] < 300:
-            return False
-    LAST_ALERT[symbol] = now
-    return True
-
-def detect_surge(symbol, price, volume):
-    now = time.time()
-    if symbol not in PRICE_CACHE:
-        PRICE_CACHE[symbol] = {"previous": price, "current": price, "time": now}
-        VOLUME_CACHE[symbol] = deque(maxlen=10)
-        VOLUME_CACHE[symbol].append(volume)
-        return False
-    previous_price = PRICE_CACHE[symbol]["current"]
-    PRICE_CACHE[symbol]["previous"] = previous_price
-    PRICE_CACHE[symbol]["current"] = price
-    PRICE_CACHE[symbol]["time"] = now
-    VOLUME_CACHE[symbol].append(volume)
-    if previous_price <= 0:
-        return False
-    momentum = ((price - previous_price) / previous_price) * 100
-    acceleration = 0
-    if len(PRICE_CACHE[symbol]) > 2:
-        acceleration = momentum * 0.3
-    volume_spike = 1.0
-    if len(VOLUME_CACHE[symbol]) >= 5:
-        avg_volume = sum(list(VOLUME_CACHE[symbol])[-5:]) / 5
-        volume_spike = volume / avg_volume if avg_volume > 0 else 1.0
-    is_surge = (
-        momentum >= MIN_MOMENTUM and
-        acceleration >= MIN_ACCELERATION and
-        volume_spike >= MIN_VOLUME_SPIKE and
-        volume >= MIN_VOLUME
-    )
-    if is_surge:
-        return {
-            "momentum": momentum,
-            "acceleration": acceleration,
-            "volume_spike": volume_spike,
-            "volume": volume,
-            "price": price
-        }
-    return False
-
-# ================= جلب جميع الأسهم النشطة (شامل) =================
-async def fetch_all_active_symbols():
-    """جلب جميع الأسهم النشطة من TradingView (بدون قائمة ثابتة)"""
+# ================= FETCH ALL SYMBOLS (DYNAMIC) =================
+async def fetch_all_symbols(session):
     url = "https://scanner.tradingview.com/america/scan"
     payload = {
         "filter": [
             {"left": "exchange", "operation": "in_range", "right": ["NASDAQ", "NYSE", "AMEX"]},
-            {"left": "close", "operation": "nempty"}
+            {"left": "close", "operation": "nempty"},
+            {"left": "market_cap_basic", "operation": "in_range", "right": [MIN_MARKET_CAP, MAX_MARKET_CAP]},
+            {"left": "close", "operation": "in_range", "right": [MIN_PRICE, MAX_PRICE]}
         ],
         "options": {"lang": "en"},
         "symbols": {"query": {"types": []}, "tickers": []},
-        "columns": ["name", "close", "volume"]
+        "columns": ["name", "close", "volume", "market_cap_basic"]
     }
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, timeout=10) as resp:
-                data = await resp.json()
-                symbols = []
-                for item in data.get('data', []):
-                    d = item['d']
-                    if len(d) >= 3 and d[1] is not None and d[2] is not None and d[2] > 50000:
-                        symbols.append(d[0])
-                return symbols[:500]
+        async with session.post(url, json=payload, timeout=15) as resp:
+            data = await resp.json()
+            symbols = []
+            for item in data.get('data', []):
+                d = item['d']
+                if len(d) >= 4 and d[1] is not None and d[2] is not None and d[3] is not None:
+                    symbols.append(d[0])
+            return symbols[:200]
     except Exception as e:
         print(f"خطأ في جلب الأسهم: {e}")
         return []
 
-# ================= WEB SOCKET مع تحديث القائمة ديناميكياً =================
-async def itick_websocket():
-    while True:
-        try:
-            symbols = await fetch_all_active_symbols()
-            if not symbols:
-                print("⚠️ لا توجد أسهم نشطة، إعادة المحاولة...")
-                await asyncio.sleep(30)
-                continue
-            print(f"✅ تم جلب {len(symbols)} سهماً نشطاً")
-            symbols_param = ",".join([f"{sym}$US" for sym in symbols[:500]])
-            uri = "wss://api.itick.org/stock"
-            headers = {"token": ITICK_TOKEN}
-            async with websockets.connect(uri, extra_headers=headers) as websocket:
-                print("✅ متصل بـ iTick WebSocket")
-                subscribe_msg = {
-                    "ac": "subscribe",
-                    "params": symbols_param,
-                    "types": "quote,tick"
-                }
-                await websocket.send(json.dumps(subscribe_msg))
-                print(f"📡 تم الاشتراك في {len(symbols)} سهماً")
-                async for message in websocket:
-                    try:
-                        data = json.loads(message)
-                        await process_websocket_data(data)
-                    except Exception as e:
-                        print(f"خطأ في المعالجة: {e}")
-        except Exception as e:
-            print(f"❌ WebSocket error: {e}")
-            await asyncio.sleep(5)
+# ================= FETCH STOCK DATA =================
+async def fetch_stock_data(session, symbol):
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    try:
+        async with session.get(url, timeout=10) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json()
+            result = data.get('chart', {}).get('result', [])
+            if not result:
+                return None
+            meta = result[0].get('meta', {})
+            indicators = result[0].get('indicators', {}).get('quote', [{}])[0]
+            price = meta.get('regularMarketPrice')
+            volume = meta.get('regularMarketVolume')
+            market_cap = meta.get('marketCap')
+            if not price or not volume or not market_cap:
+                return None
+            closes = indicators.get('close', [])
+            volumes = indicators.get('volume', [])
+            if len(closes) < 50 or len(volumes) < 10:
+                return None
+            sma7 = sum(closes[-7:]) / 7
+            sma20 = sum(closes[-20:]) / 20
+            sma50 = sum(closes[-50:]) / 50
+            avg_volume_10d = sum(volumes[-10:]) / 10
+            volume_spike = volume / avg_volume_10d if avg_volume_10d > 0 else 0
+            rsi = 50
+            return {
+                "symbol": symbol,
+                "price": price,
+                "volume": volume,
+                "market_cap": market_cap,
+                "sma7": sma7,
+                "sma20": sma20,
+                "sma50": sma50,
+                "avg_volume_10d": avg_volume_10d,
+                "volume_spike": volume_spike,
+                "rsi": rsi
+            }
+    except Exception as e:
+        return None
 
-# ================= PROCESS WEBSOCKET DATA =================
-async def process_websocket_data(data):
-    symbol = data.get("symbol")
-    price = data.get("price") or data.get("ld")
-    volume = data.get("volume") or data.get("v")
-    if not symbol or not price:
-        return
-    surge_data = detect_surge(symbol, price, volume)
-    if surge_data and can_alert(symbol):
-        momentum = surge_data["momentum"]
-        acceleration = surge_data["acceleration"]
-        volume_spike = surge_data["volume_spike"]
-        current_price = surge_data["price"]
-        score = get_signal_score(momentum, acceleration, volume_spike)
-        today = time.strftime("%Y-%m-%d")
-        if today not in DAILY_ALERTS:
-            DAILY_ALERTS[today] = {}
-        DAILY_ALERTS[today][symbol] = DAILY_ALERTS[today].get(symbol, 0) + 1
-        msg = (
-            f"🚨 *اندفاع مفاجئ* 🚨\n\n"
-            f"📊 الرمز: `{symbol}`\n"
-            f"💰 السعر: `${current_price:.2f}`\n"
-            f"📈 الزخم: `+{momentum:.2f}%`\n"
-            f"🚀 التسارع: `+{acceleration:.2f}%`\n"
-            f"📊 الحجم النسبي: `{volume_spike:.1f}x`\n"
-            f"🔥 القوة: `{score}/100`\n"
-            f"🔢 التنبيه: `{DAILY_ALERTS[today][symbol]}`\n"
-            f"🕒 {time.strftime('%H:%M:%S')}\n\n"
-            f"⚠️ للمتابعة فقط"
-        )
-        await send(msg)
-        print(f"📤 تم إرسال تنبيه لـ {symbol}")
+# ================= CHECK STRATEGY =================
+def check_golden_cross_surge(data):
+    if not data:
+        return False
+    if not (MIN_PRICE <= data["price"] <= MAX_PRICE):
+        return False
+    if not (MIN_MARKET_CAP <= data["market_cap"] <= MAX_MARKET_CAP):
+        return False
+    if not (data["sma7"] > data["sma20"] > data["sma50"]):
+        return False
+    if not (data["volume_spike"] >= VOLUME_SPIKE_MIN):
+        return False
+    if not (data["avg_volume_10d"] >= MIN_VOLUME_10D):
+        return False
+    if not (MIN_RSI <= data["rsi"] <= MAX_RSI):
+        return False
+    return True
 
-# ================= MAIN =================
+# ================= CAN ALERT =================
+def can_alert(symbol):
+    now = time.time()
+    if symbol in ALERT_HISTORY:
+        if now - ALERT_HISTORY[symbol] < 3600:
+            return False
+    ALERT_HISTORY[symbol] = now
+    return True
+
+# ================= SCAN MARKET =================
+async def scan_market():
+    async with aiohttp.ClientSession() as session:
+        symbols = await fetch_all_symbols(session)
+        if not symbols:
+            print("⚠️ لا توجد أسهم، إعادة المحاولة...")
+            return
+        print(f"✅ جاري فحص {len(symbols)} سهماً...")
+        for symbol in symbols:
+            data = await fetch_stock_data(session, symbol)
+            if data and check_golden_cross_surge(data) and can_alert(symbol):
+                today = datetime.now().strftime("%Y-%m-%d")
+                DAILY_ALERTS[today] = DAILY_ALERTS.get(today, 0) + 1
+                msg = (
+                    f"🐉 *Golden Cross Surge*\n\n"
+                    f"📊 الرمز: `{symbol}`\n"
+                    f"💰 السعر: `${data['price']:.2f}`\n"
+                    f"📈 7 SMA: `${data['sma7']:.2f}`\n"
+                    f"📈 20 SMA: `${data['sma20']:.2f}`\n"
+                    f"📈 50 SMA: `${data['sma50']:.2f}`\n"
+                    f"📊 الحجم النسبي: `{data['volume_spike']:.1f}x`\n"
+                    f"📊 متوسط 10 أيام: `{data['avg_volume_10d']:,.0f}`\n"
+                    f"📉 RSI: `{data['rsi']:.0f}`\n"
+                    f"🏢 القيمة السوقية: `${data['market_cap']/1e9:.2f}B`\n"
+                    f"🔢 التنبيه: `#{DAILY_ALERTS[today]}`\n"
+                    f"🕒 {datetime.now().strftime('%H:%M:%S')}\n\n"
+                    f"✅ فرصة Golden Cross مع سيولة قوية"
+                )
+                await send(msg)
+                print(f"📤 تم إرسال تنبيه لـ {symbol}")
+            await asyncio.sleep(0.1)
+
+# ================= MAIN LOOP =================
 async def main():
-    await send("🔥 *الماسح الشامل - استراتيجية الاندفاع المفاجئ*")
-    print("🚀 بدء تشغيل الماسح الشامل...")
-    await itick_websocket()
+    await send("🔥 *تم تشغيل Golden Cross Surge*")
+    print("🚀 بدء تشغيل Golden Cross Surge...")
+    while True:
+        await scan_market()
+        await asyncio.sleep(120)
 
 if __name__ == "__main__":
     asyncio.run(main())
