@@ -13,7 +13,7 @@ import pytz
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "🐉 M60 - Hidden Hunter is running", 200
+    return "🐉 M60 - Real Liquidity Hunter is running", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -36,14 +36,15 @@ NY_TZ = pytz.timezone('America/New_York')
 MIN_PRICE = 0.5
 MAX_PRICE = 3.0
 MIN_VOLUME_SPIKE = 2.5
-MIN_VOLUME_ACCELERATION = 1.8
-BREAKOUT_MINUTES = 15
-MIN_FLOAT_SHRINK = 0.8
+MIN_VOLUME_ACCELERATION = 1.5
+MIN_CONSECUTIVE_ACCELERATION = 3
+SMA20_LOOKBACK = 20
+MAX_SPREAD_RATIO = 0.02
 ALERT_COOLDOWN = 1800
 
 # ====================== CACHE ===================================
 alert_history = {}
-alert_counters = {}  # ✅ لكل سهم عداد منفصل
+alert_counters = {}
 last_reset_date = datetime.now(NY_TZ).date()
 
 # ====================== TELEGRAM ================================
@@ -54,47 +55,58 @@ async def send_telegram(msg):
     except Exception as e:
         print(f"❌ فشل الإرسال: {e}")
 
-# ====================== DETECT SURGE ===========================
-async def detect_surge(symbol):
+# ====================== DETECT LIQUIDITY =======================
+async def detect_real_liquidity(symbol):
     try:
         stock = yf.Ticker(symbol)
         info = stock.info
-        hist = stock.history(period="1d", interval="5m")
-        if hist.empty or len(hist) < 10:
+        hist = stock.history(period="2d", interval="5m")
+        if hist.empty or len(hist) < 20:
             return None
 
+        # البيانات الحالية
         current = hist.iloc[-1]
-        prev = hist.iloc[-2] if len(hist) > 1 else current
         price = current["Close"]
         volume = current["Volume"]
-        prev_volume = prev["Volume"]
         high = current["High"]
-        prev_high = hist["High"].iloc[-10:].max()
+        low = current["Low"]
 
+        # الحجم النسبي
         avg_volume_10 = hist["Volume"].iloc[-10:].mean()
         volume_spike = volume / avg_volume_10 if avg_volume_10 > 0 else 0
 
+        # تسارع الحجم (مقارنة بالشمعة السابقة)
+        prev_volume = hist["Volume"].iloc[-2] if len(hist) > 1 else volume
         volume_acceleration = volume / prev_volume if prev_volume > 0 else 0
-        breakout = price > prev_high * 0.99
 
-        float_shares = info.get("sharesOutstanding", 0) * 0.2
-        if float_shares > 0:
-            float_shrink = 1 - (volume / float_shares)
-        else:
-            float_shrink = 0
+        # استمرارية التسارع (آخر 3 شموع)
+        volumes = hist["Volume"].iloc[-4:].tolist()
+        consecutive_acceleration = all(volumes[i] > volumes[i-1] for i in range(1, len(volumes)))
 
+        # SMA20
+        closes = hist["Close"].iloc[-SMA20_LOOKBACK:]
+        sma20 = closes.mean() if len(closes) >= SMA20_LOOKBACK else price
+        price_above_sma20 = price > sma20
+
+        # الفجوة السعرية (Spread)
+        spread = (high - low) / price if price > 0 else 1
+        low_spread = spread < MAX_SPREAD_RATIO
+
+        # الأخبار السلبية (محاكاة)
         news_negative = False
 
-        is_surge = (
+        # التحقق من شروط السيولة الحقيقية
+        is_real_liquidity = (
             MIN_PRICE <= price <= MAX_PRICE and
             volume_spike >= MIN_VOLUME_SPIKE and
             volume_acceleration >= MIN_VOLUME_ACCELERATION and
-            breakout and
-            float_shrink >= MIN_FLOAT_SHRINK and
+            consecutive_acceleration and
+            price_above_sma20 and
+            low_spread and
             not news_negative
         )
 
-        if is_surge:
+        if is_real_liquidity:
             now_ny = datetime.now(NY_TZ)
             return {
                 "symbol": symbol,
@@ -102,9 +114,10 @@ async def detect_surge(symbol):
                 "volume": volume,
                 "volume_spike": volume_spike,
                 "volume_acceleration": volume_acceleration,
-                "breakout": breakout,
-                "float_shrink": float_shrink,
-                "time": now_ny.strftime("%H:%M"),  # ✅ توقيت نيويورك
+                "consecutive_acceleration": consecutive_acceleration,
+                "sma20": sma20,
+                "spread": spread,
+                "time": now_ny.strftime("%H:%M"),
                 "hour": now_ny.hour,
                 "minute": now_ny.minute
             }
@@ -150,14 +163,14 @@ async def fetch_active_symbols(session):
 async def main_loop():
     global last_reset_date
 
-    await send_telegram("🔥 *M60 - Hidden Hunter (استراتيجية الانفجار السعري)*")
+    await send_telegram("🔥 *M60 - صياد السيولة الحقيقية (Real Liquidity Hunter)*")
     print("🚀 بدء العمل...")
 
     while True:
         try:
             now_ny = datetime.now(NY_TZ)
             if now_ny.date() != last_reset_date:
-                alert_counters.clear()  # ✅ إعادة ضبط عدادات الأسهم يومياً
+                alert_counters.clear()
                 last_reset_date = now_ny.date()
 
             async with aiohttp.ClientSession() as session:
@@ -168,26 +181,26 @@ async def main_loop():
                     continue
 
                 print(f"🔍 فحص {len(symbols)} سهماً...")
-                tasks = [detect_surge(symbol) for symbol in symbols]
+                tasks = [detect_real_liquidity(symbol) for symbol in symbols]
                 results = await asyncio.gather(*tasks)
 
                 for data in results:
                     if data and can_alert(data["symbol"]):
-                        # ✅ عداد خاص بالسهم
                         alert_counters[data["symbol"]] = alert_counters.get(data["symbol"], 0) + 1
                         alert_num = alert_counters[data["symbol"]]
 
                         msg = (
-                            f"🚀 *انفجار سعري محتمل*\n\n"
+                            f"💧 *سيولة حقيقية - دخول أموال ذكية*\n\n"
                             f"📊 الرمز: `{data['symbol']}`\n"
                             f"💰 السعر: `${data['price']:.2f}`\n"
                             f"📈 الحجم النسبي: `{data['volume_spike']:.1f}x`\n"
                             f"⚡ تسارع الحجم: `{data['volume_acceleration']:.1f}x`\n"
-                            f"🔥 كسر القمة: `{'✅' if data['breakout'] else '❌'}`\n"
-                            f"📉 انخفاض الأسهم الحرة: `{data['float_shrink']*100:.0f}%`\n"
+                            f"📊 استمرار التسارع: `{'✅' if data['consecutive_acceleration'] else '❌'}`\n"
+                            f"📈 SMA20: `${data['sma20']:.2f}`\n"
+                            f"📉 الفجوة السعرية: `{data['spread']*100:.2f}%`\n"
                             f"🕒 وقت الكشف (نيويورك): `{data['time']}`\n"
                             f"🔢 تنبيه #{alert_num} لهذا السهم\n\n"
-                            f"⚠️ للمتابعة الفورية"
+                            f"✅ سيولة حقيقية - راقب السهم فوراً"
                         )
                         await send_telegram(msg)
                         await asyncio.sleep(1)
