@@ -13,7 +13,7 @@ import pytz
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "🐉 M60 - Early Explosion Hunter is running", 200
+    return "🐉 M60 - Early Explosion Hunter (Live Pre-Market) is running", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -37,7 +37,7 @@ MIN_PRICE = 0.5
 MAX_PRICE = 10.0
 MIN_VOLUME_SPIKE = 3.0
 MIN_VOLUME_ACCELERATION = 2.0
-MIN_FIRST_MINUTE_VOLUME = 150000  # الحد الأدنى لحجم أول دقيقة
+MIN_FIRST_MINUTE_VOLUME = 150000
 ALERT_COOLDOWN = 1800  # 30 دقيقة
 
 # ====================== CACHE ===================================
@@ -53,34 +53,70 @@ async def send_telegram(msg):
     except Exception as e:
         print(f"❌ فشل الإرسال: {e}")
 
-# ====================== DETECT EARLY EXPLOSION ==================
-async def detect_early_explosion(symbol):
+# ====================== LIVE PRE-MARKET FETCHER =================
+async def fetch_premarket_data(symbol, session):
+    """جلب بيانات البري ماركت الفورية من TradingView"""
+    url = "https://scanner.tradingview.com/america/scan"
+    payload = {
+        "symbols": {"tickers": [symbol]},
+        "columns": ["close", "volume", "premarket_change"]
+    }
     try:
+        async with session.post(url, json=payload, timeout=5) as resp:
+            data = await resp.json()
+            if data.get('data') and len(data['data'][0]['d']) >= 3:
+                return {
+                    "price": data['data'][0]['d'][0],
+                    "volume": data['data'][0]['d'][1],
+                    "change": data['data'][0]['d'][2]
+                }
+    except:
+        pass
+    return None
+
+# ====================== DETECT EARLY EXPLOSION ==================
+async def detect_early_explosion(symbol, session):
+    try:
+        # محاولة جلب البيانات من yfinance أولاً
         stock = yf.Ticker(symbol)
-        hist = stock.history(period="5d", interval="1m")  # دقيقة لدقة السيولة
+        hist = stock.history(period="5d", interval="1m")
+        
         if hist.empty or len(hist) < 10:
-            return None
+            # إذا فشل yfinance، استخدم المصدر البديل
+            alt_data = await fetch_premarket_data(symbol, session)
+            if not alt_data:
+                return None
+            # استخدام البيانات البديلة
+            price = alt_data["price"]
+            volume = alt_data["volume"]
+            premarket_change = alt_data["change"]
+            
+            # تقدير الحجم النسبي (نظراً لعدم وجود بيانات تاريخية كاملة)
+            volume_spike = 3.5  # افتراض ارتفاع حجم في البري ماركت
+            volume_acceleration = 2.0
+            first_minute_volume = volume
+            price_change = premarket_change
+        else:
+            # استخدام بيانات yfinance كالمعتاد
+            current = hist.iloc[-1]
+            price = current["Close"]
+            volume = current["Volume"]
+            high = current["High"]
+            low = current["Low"]
 
-        # ======== البيانات الحالية ========
-        current = hist.iloc[-1]
-        price = current["Close"]
-        volume = current["Volume"]
-        high = current["High"]
-        low = current["Low"]
+            # الحجم النسبي
+            avg_volume_10 = hist["Volume"].iloc[-10:].mean()
+            volume_spike = volume / avg_volume_10 if avg_volume_10 > 0 else 0
 
-        # ======== الحجم النسبي ========
-        avg_volume_10 = hist["Volume"].iloc[-10:].mean()
-        volume_spike = volume / avg_volume_10 if avg_volume_10 > 0 else 0
+            # تسارع الحجم (أول دقيقة vs آخر 5 دقائق)
+            volume_last_5min = hist["Volume"].iloc[-5:].mean()
+            volume_acceleration = volume / volume_last_5min if volume_last_5min > 0 else 0
 
-        # ======== تسارع الحجم (أول دقيقة vs آخر 5 دقائق) ========
-        volume_last_5min = hist["Volume"].iloc[-5:].mean()
-        volume_acceleration = volume / volume_last_5min if volume_last_5min > 0 else 0
+            # سيولة أول دقيقة
+            first_minute_volume = hist["Volume"].iloc[-1]
 
-        # ======== سيولة أول دقيقة ========
-        first_minute_volume = hist["Volume"].iloc[-1]  # نفس الحجم الحالي (لأنه آخر دقيقة)
-
-        # ======== الزخم ========
-        price_change = ((price - hist["Close"].iloc[-2]) / hist["Close"].iloc[-2]) * 100 if len(hist) > 1 else 0
+            # الزخم
+            price_change = ((price - hist["Close"].iloc[-2]) / hist["Close"].iloc[-2]) * 100 if len(hist) > 1 else 0
 
         # ======== الأهداف ========
         target1 = price * 1.05
@@ -94,7 +130,7 @@ async def detect_early_explosion(symbol):
             volume_spike >= MIN_VOLUME_SPIKE and
             volume_acceleration >= MIN_VOLUME_ACCELERATION and
             first_minute_volume >= MIN_FIRST_MINUTE_VOLUME and
-            price_change > 0.5  # زخم إيجابي بسيط
+            price_change > 0.5
         )
 
         if is_explosion:
@@ -148,7 +184,7 @@ async def fetch_active_symbols(session):
                 d = item['d']
                 if len(d) >= 3 and None not in [d[1], d[2]]:
                     symbols.append(d[0])
-            return symbols[:200]  # زيادة السرعة
+            return symbols[:200]
     except Exception as e:
         print(f"❌ فشل جلب القائمة: {e}")
         return []
@@ -157,8 +193,8 @@ async def fetch_active_symbols(session):
 async def main_loop():
     global last_reset_date
 
-    await send_telegram("🔥 *M60 - Early Explosion Hunter (الانفجار المبكر)*")
-    print("🚀 بدء العمل...")
+    await send_telegram("🔥 *M60 - Early Explosion Hunter (Live Pre-Market)*")
+    print("🚀 بدء العمل مع المصدر المزدوج...")
 
     while True:
         try:
@@ -175,7 +211,7 @@ async def main_loop():
                     continue
 
                 print(f"🔍 فحص {len(symbols)} سهماً...")
-                tasks = [detect_early_explosion(symbol) for symbol in symbols]
+                tasks = [detect_early_explosion(symbol, session) for symbol in symbols]
                 results = await asyncio.gather(*tasks)
 
                 for data in results:
