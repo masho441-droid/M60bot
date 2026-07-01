@@ -1,58 +1,132 @@
 import os
 import asyncio
-import json
 import aiohttp
 import time
+import json
+import yfinance as yf
+from datetime import datetime, timedelta
 from telegram import Bot
 from flask import Flask
 import threading
-from datetime import datetime
 
-# ================= SERVER =================
+# ====================== DUMMY WEB SERVER (لـ Render/Koyeb) ======================
 app = Flask(__name__)
+
 @app.route("/")
 def home():
-    return "M60 Bot is running.", 200
+    return "🐉 M60 Golden Cross Surge - Always On", 200
 
-def run_server():
+def run_web():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
-threading.Thread(target=run_server, daemon=True).start()
-# ==========================================
+threading.Thread(target=run_web, daemon=True).start()
+# =================================================================================
 
-# ================= CONFIG =================
+# ========================== الإعدادات السرية ====================================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 if not TOKEN or not CHAT_ID:
-    raise ValueError("Missing TELEGRAM_TOKEN or CHAT_ID")
+    raise ValueError("❌ TELEGRAM_TOKEN أو CHAT_ID غير موجودة")
 
 bot = Bot(token=TOKEN)
 
-# ================= SETTINGS =================
+# ========================== إعدادات الاستراتيجية ================================
 MIN_PRICE = 2.0
 MAX_PRICE = 10.0
 MIN_MARKET_CAP = 100_000_000
 MAX_MARKET_CAP = 2_000_000_000
-MIN_VOLUME_10D = 500_000
-VOLUME_SPIKE_MIN = 1.5
+MIN_AVG_VOLUME_10D = 500_000
+MIN_VOLUME_SPIKE = 1.5
 MIN_RSI = 35
 MAX_RSI = 65
+ALERT_COOLDOWN = 3600  # ثانية (ساعة واحدة)
 
-# ================= CACHE =================
-ALERT_HISTORY = {}
-DAILY_ALERTS = {}
+# ========================== الذاكرة المؤقتة ====================================
+alert_history = {}
+daily_counter = 0
+last_reset_date = datetime.now().date()
 
-# ================= TELEGRAM =================
-async def send(msg):
+# ========================== دالة الإرسال ========================================
+async def send_telegram(msg):
     try:
         await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
+        print("✅ تم إرسال التنبيه")
     except Exception as e:
-        print(f"[Telegram Error] {e}")
+        print(f"❌ فشل الإرسال: {e}")
 
-# ================= FETCH ALL SYMBOLS =================
-async def fetch_all_symbols(session):
+# ========================== جلب بيانات السهم (المصدر الرئيسي) ====================
+async def fetch_stock_data(symbol):
+    try:
+        stock = yf.Ticker(symbol)
+        info = stock.info
+        hist = stock.history(period="3mo")
+        if hist.empty or len(hist) < 50:
+            return None
+
+        price = info.get("regularMarketPrice")
+        if not price:
+            return None
+
+        close = hist["Close"]
+        volume = hist["Volume"]
+        if len(close) < 50 or len(volume) < 10:
+            return None
+
+        sma7 = close.iloc[-7:].mean()
+        sma20 = close.iloc[-20:].mean()
+        sma50 = close.iloc[-50:].mean()
+        avg_volume_10d = volume.iloc[-10:].mean()
+        current_volume = volume.iloc[-1]
+        volume_spike = current_volume / avg_volume_10d if avg_volume_10d > 0 else 0
+
+        rsi = 50  # يمكن إضافة حساب RSI حقيقي لاحقاً
+        market_cap = info.get("marketCap", 0)
+
+        return {
+            "symbol": symbol,
+            "price": price,
+            "volume_spike": volume_spike,
+            "avg_volume_10d": avg_volume_10d,
+            "sma7": sma7,
+            "sma20": sma20,
+            "sma50": sma50,
+            "rsi": rsi,
+            "market_cap": market_cap
+        }
+    except Exception as e:
+        print(f"⚠️ فشل جلب {symbol}: {e}")
+        return None
+
+# ========================== فحص الاستراتيجية ====================================
+def check_golden_cross(data):
+    if not data:
+        return False
+    if not (MIN_PRICE <= data["price"] <= MAX_PRICE):
+        return False
+    if not (MIN_MARKET_CAP <= data["market_cap"] <= MAX_MARKET_CAP):
+        return False
+    if not (data["sma7"] > data["sma20"] > data["sma50"]):
+        return False
+    if data["volume_spike"] < MIN_VOLUME_SPIKE:
+        return False
+    if data["avg_volume_10d"] < MIN_AVG_VOLUME_10D:
+        return False
+    if not (MIN_RSI <= data["rsi"] <= MAX_RSI):
+        return False
+    return True
+
+def can_alert(symbol):
+    now = time.time()
+    if symbol in alert_history:
+        if now - alert_history[symbol] < ALERT_COOLDOWN:
+            return False
+    alert_history[symbol] = now
+    return True
+
+# ========================== جلب قائمة الأسهم النشطة ============================
+async def fetch_active_symbols(session):
     url = "https://scanner.tradingview.com/america/scan"
     payload = {
         "filter": [
@@ -70,117 +144,67 @@ async def fetch_all_symbols(session):
             symbols = []
             for item in data.get('data', []):
                 d = item['d']
-                if len(d) >= 4 and d[1] is not None and d[2] is not None and d[3] is not None:
+                if len(d) >= 4 and None not in [d[1], d[2], d[3]]:
                     symbols.append(d[0])
-            return symbols[:200]
+            return symbols[:250]
     except Exception as e:
-        print(f"خطأ في جلب الأسهم: {e}")
+        print(f"❌ فشل جلب القائمة: {e}")
         return []
 
-# ================= FETCH STOCK DATA =================
-async def fetch_stock_data(session, symbol):
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-    try:
-        async with session.get(url, timeout=10) as resp:
-            if resp.status != 200:
-                return None
-            data = await resp.json()
-            result = data.get('chart', {}).get('result', [])
-            if not result:
-                return None
-            meta = result[0].get('meta', {})
-            indicators = result[0].get('indicators', {}).get('quote', [{}])[0]
-            price = meta.get('regularMarketPrice')
-            volume = meta.get('regularMarketVolume')
-            market_cap = meta.get('marketCap')
-            if not price or not volume or not market_cap:
-                return None
-            closes = indicators.get('close', [])
-            volumes = indicators.get('volume', [])
-            if len(closes) < 50 or len(volumes) < 10:
-                return None
-            sma7 = sum(closes[-7:]) / 7
-            sma20 = sum(closes[-20:]) / 20
-            sma50 = sum(closes[-50:]) / 50
-            avg_volume_10d = sum(volumes[-10:]) / 10
-            volume_spike = volume / avg_volume_10d if avg_volume_10d > 0 else 0
-            rsi = 50
-            return {
-                "symbol": symbol,
-                "price": price,
-                "volume": volume,
-                "market_cap": market_cap,
-                "sma7": sma7,
-                "sma20": sma20,
-                "sma50": sma50,
-                "avg_volume_10d": avg_volume_10d,
-                "volume_spike": volume_spike,
-                "rsi": rsi
-            }
-    except Exception as e:
-        return None
+# ========================== الحلقة الرئيسية ====================================
+async def main_loop():
+    global daily_counter, last_reset_date
 
-# ================= CHECK STRATEGY =================
-def check_strategy(data):
-    if not data:
-        return False
-    if not (data["sma7"] > data["sma20"] > data["sma50"]):
-        return False
-    if data["volume_spike"] < VOLUME_SPIKE_MIN:
-        return False
-    if data["avg_volume_10d"] < MIN_VOLUME_10D:
-        return False
-    if not (MIN_RSI <= data["rsi"] <= MAX_RSI):
-        return False
-    return True
+    await send_telegram("🔥 *M60 Golden Cross Surge - تم التشغيل بنجاح*")
+    print("🚀 بدء العمل...")
 
-def can_alert(symbol):
-    now = time.time()
-    if symbol in ALERT_HISTORY:
-        if now - ALERT_HISTORY[symbol] < 3600:
-            return False
-    ALERT_HISTORY[symbol] = now
-    return True
-
-# ================= SCAN =================
-async def scan():
-    async with aiohttp.ClientSession() as session:
-        symbols = await fetch_all_symbols(session)
-        if not symbols:
-            print("⚠️ لا توجد أسهم")
-            return
-        print(f"✅ فحص {len(symbols)} سهماً...")
-        for symbol in symbols:
-            data = await fetch_stock_data(session, symbol)
-            if data and check_strategy(data) and can_alert(symbol):
-                today = datetime.now().strftime("%Y-%m-%d")
-                DAILY_ALERTS[today] = DAILY_ALERTS.get(today, 0) + 1
-                msg = (
-                    f"🐉 *Golden Cross Surge*\n\n"
-                    f"📊 الرمز: `{symbol}`\n"
-                    f"💰 السعر: `${data['price']:.2f}`\n"
-                    f"📈 7 SMA: `${data['sma7']:.2f}`\n"
-                    f"📈 20 SMA: `${data['sma20']:.2f}`\n"
-                    f"📈 50 SMA: `${data['sma50']:.2f}`\n"
-                    f"📊 الحجم النسبي: `{data['volume_spike']:.1f}x`\n"
-                    f"📊 متوسط 10 أيام: `{data['avg_volume_10d']:,.0f}`\n"
-                    f"📉 RSI: `{data['rsi']:.0f}`\n"
-                    f"🏢 القيمة السوقية: `${data['market_cap']/1e9:.2f}B`\n"
-                    f"🔢 التنبيه: `#{DAILY_ALERTS[today]}`\n"
-                    f"🕒 {datetime.now().strftime('%H:%M:%S')}\n\n"
-                    f"✅ فرصة Golden Cross مع سيولة قوية"
-                )
-                await send(msg)
-                print(f"📤 تم إرسال {symbol}")
-            await asyncio.sleep(0.1)
-
-# ================= MAIN =================
-async def main():
-    await send("🔥 *تم تشغيل Golden Cross Surge*")
-    print("🚀 بدء التشغيل...")
     while True:
-        await scan()
-        await asyncio.sleep(120)
+        try:
+            # إعادة ضبط العداد يومياً
+            now = datetime.now()
+            if now.date() != last_reset_date:
+                daily_counter = 0
+                last_reset_date = now.date()
 
+            async with aiohttp.ClientSession() as session:
+                symbols = await fetch_active_symbols(session)
+                if not symbols:
+                    print("⚠️ لا توجد أسهم نشطة، إعادة المحاولة بعد دقيقة")
+                    await asyncio.sleep(60)
+                    continue
+
+                print(f"🔍 جاري فحص {len(symbols)} سهماً...")
+                tasks = [fetch_stock_data(symbol) for symbol in symbols]
+                results = await asyncio.gather(*tasks)
+
+                for data in results:
+                    if data and check_golden_cross(data) and can_alert(data["symbol"]):
+                        daily_counter += 1
+                        msg = (
+                            f"🐉 *Golden Cross Surge*\n\n"
+                            f"📊 الرمز: `{data['symbol']}`\n"
+                            f"💰 السعر: `${data['price']:.2f}`\n"
+                            f"📈 7 SMA: `${data['sma7']:.2f}`\n"
+                            f"📈 20 SMA: `${data['sma20']:.2f}`\n"
+                            f"📈 50 SMA: `${data['sma50']:.2f}`\n"
+                            f"📊 الحجم النسبي: `{data['volume_spike']:.1f}x`\n"
+                            f"📊 متوسط 10 أيام: `{data['avg_volume_10d']:,.0f}`\n"
+                            f"📉 RSI: `{data['rsi']:.0f}`\n"
+                            f"🏢 القيمة السوقية: `${data['market_cap']/1e9:.2f}B`\n"
+                            f"🔢 التنبيه اليومي: `#{daily_counter}`\n"
+                            f"🕒 {datetime.now().strftime('%H:%M:%S')}\n\n"
+                            f"✅ فرصة Golden Cross مع سيولة قوية"
+                        )
+                        await send_telegram(msg)
+                        await asyncio.sleep(1)  # منع التكرار اللحظي
+
+                print(f"⏳ انتهت الدورة، انتظار 90 ثانية...")
+                await asyncio.sleep(90)
+
+        except Exception as e:
+            print(f"❌ خطأ رئيسي: {e}")
+            await asyncio.sleep(30)
+
+# ========================== تشغيل البوت ========================================
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main_loop())
