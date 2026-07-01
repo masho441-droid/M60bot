@@ -7,6 +7,7 @@ from datetime import datetime
 from telegram import Bot
 from flask import Flask
 import threading
+import pytz
 
 # ====================== DUMMY WEB SERVER ======================
 app = Flask(__name__)
@@ -29,6 +30,7 @@ if not TOKEN or not CHAT_ID:
     raise ValueError("❌ TELEGRAM_TOKEN أو CHAT_ID غير موجودة")
 
 bot = Bot(token=TOKEN)
+NY_TZ = pytz.timezone('America/New_York')
 
 # ====================== STRATEGY SETTINGS ======================
 MIN_PRICE = 0.5
@@ -36,15 +38,13 @@ MAX_PRICE = 3.0
 MIN_VOLUME_SPIKE = 2.5
 MIN_VOLUME_ACCELERATION = 1.8
 BREAKOUT_MINUTES = 15
-MIN_FLOAT_SHRINK = 0.8  # انخفاض عدد الأسهم المتداولة
-ALERT_COOLDOWN = 1800  # 30 دقيقة
+MIN_FLOAT_SHRINK = 0.8
+ALERT_COOLDOWN = 1800
 
 # ====================== CACHE ===================================
 alert_history = {}
-daily_counter = 0
-last_reset_date = datetime.now().date()
-price_cache = {}
-volume_cache = {}
+alert_counters = {}  # ✅ لكل سهم عداد منفصل
+last_reset_date = datetime.now(NY_TZ).date()
 
 # ====================== TELEGRAM ================================
 async def send_telegram(msg):
@@ -63,7 +63,6 @@ async def detect_surge(symbol):
         if hist.empty or len(hist) < 10:
             return None
 
-        # البيانات الحالية
         current = hist.iloc[-1]
         prev = hist.iloc[-2] if len(hist) > 1 else current
         price = current["Close"]
@@ -72,27 +71,20 @@ async def detect_surge(symbol):
         high = current["High"]
         prev_high = hist["High"].iloc[-10:].max()
 
-        # الحجم النسبي
         avg_volume_10 = hist["Volume"].iloc[-10:].mean()
         volume_spike = volume / avg_volume_10 if avg_volume_10 > 0 else 0
 
-        # تسارع السيولة
         volume_acceleration = volume / prev_volume if prev_volume > 0 else 0
-
-        # كسر القمة
         breakout = price > prev_high * 0.99
 
-        # حجم التداول الحر (تقديري)
         float_shares = info.get("sharesOutstanding", 0) * 0.2
         if float_shares > 0:
             float_shrink = 1 - (volume / float_shares)
         else:
             float_shrink = 0
 
-        # الأخبار (محاكاة)
-        news_negative = False  # يمكن استبدالها بـ API أخبار
+        news_negative = False
 
-        # التحقق من الشروط
         is_surge = (
             MIN_PRICE <= price <= MAX_PRICE and
             volume_spike >= MIN_VOLUME_SPIKE and
@@ -103,6 +95,7 @@ async def detect_surge(symbol):
         )
 
         if is_surge:
+            now_ny = datetime.now(NY_TZ)
             return {
                 "symbol": symbol,
                 "price": price,
@@ -111,7 +104,9 @@ async def detect_surge(symbol):
                 "volume_acceleration": volume_acceleration,
                 "breakout": breakout,
                 "float_shrink": float_shrink,
-                "time": datetime.now().strftime("%H:%M")
+                "time": now_ny.strftime("%H:%M"),  # ✅ توقيت نيويورك
+                "hour": now_ny.hour,
+                "minute": now_ny.minute
             }
         return None
     except Exception as e:
@@ -153,17 +148,17 @@ async def fetch_active_symbols(session):
 
 # ====================== MAIN LOOP ===============================
 async def main_loop():
-    global daily_counter, last_reset_date
+    global last_reset_date
 
     await send_telegram("🔥 *M60 - Hidden Hunter (استراتيجية الانفجار السعري)*")
     print("🚀 بدء العمل...")
 
     while True:
         try:
-            now = datetime.now()
-            if now.date() != last_reset_date:
-                daily_counter = 0
-                last_reset_date = now.date()
+            now_ny = datetime.now(NY_TZ)
+            if now_ny.date() != last_reset_date:
+                alert_counters.clear()  # ✅ إعادة ضبط عدادات الأسهم يومياً
+                last_reset_date = now_ny.date()
 
             async with aiohttp.ClientSession() as session:
                 symbols = await fetch_active_symbols(session)
@@ -178,7 +173,10 @@ async def main_loop():
 
                 for data in results:
                     if data and can_alert(data["symbol"]):
-                        daily_counter += 1
+                        # ✅ عداد خاص بالسهم
+                        alert_counters[data["symbol"]] = alert_counters.get(data["symbol"], 0) + 1
+                        alert_num = alert_counters[data["symbol"]]
+
                         msg = (
                             f"🚀 *انفجار سعري محتمل*\n\n"
                             f"📊 الرمز: `{data['symbol']}`\n"
@@ -187,8 +185,8 @@ async def main_loop():
                             f"⚡ تسارع الحجم: `{data['volume_acceleration']:.1f}x`\n"
                             f"🔥 كسر القمة: `{'✅' if data['breakout'] else '❌'}`\n"
                             f"📉 انخفاض الأسهم الحرة: `{data['float_shrink']*100:.0f}%`\n"
-                            f"🕒 وقت الكشف: `{data['time']}`\n"
-                            f"🔢 التنبيه اليومي: `#{daily_counter}`\n\n"
+                            f"🕒 وقت الكشف (نيويورك): `{data['time']}`\n"
+                            f"🔢 تنبيه #{alert_num} لهذا السهم\n\n"
                             f"⚠️ للمتابعة الفورية"
                         )
                         await send_telegram(msg)
