@@ -1,27 +1,25 @@
 import os
 import asyncio
-import time
 import json
 import aiohttp
+import time
 from telegram import Bot
 from flask import Flask
 import threading
 from datetime import datetime
-import pytz
 
-# ================= DUMMY WEB SERVER =================
-flask_app = Flask(__name__)
-
-@flask_app.route("/")
+# ================= SERVER =================
+app = Flask(__name__)
+@app.route("/")
 def home():
-    return "M60 Golden Cross Surge is running.", 200
+    return "M60 Bot is running.", 200
 
-def run_web():
+def run_server():
     port = int(os.environ.get("PORT", 10000))
-    flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
-threading.Thread(target=run_web, daemon=True).start()
-# ====================================================
+threading.Thread(target=run_server, daemon=True).start()
+# ==========================================
 
 # ================= CONFIG =================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -53,15 +51,14 @@ async def send(msg):
     except Exception as e:
         print(f"[Telegram Error] {e}")
 
-# ================= FETCH ALL SYMBOLS (DYNAMIC) =================
+# ================= FETCH ALL SYMBOLS =================
 async def fetch_all_symbols(session):
     url = "https://scanner.tradingview.com/america/scan"
     payload = {
         "filter": [
             {"left": "exchange", "operation": "in_range", "right": ["NASDAQ", "NYSE", "AMEX"]},
-            {"left": "close", "operation": "nempty"},
-            {"left": "market_cap_basic", "operation": "in_range", "right": [MIN_MARKET_CAP, MAX_MARKET_CAP]},
-            {"left": "close", "operation": "in_range", "right": [MIN_PRICE, MAX_PRICE]}
+            {"left": "close", "operation": "in_range", "right": [MIN_PRICE, MAX_PRICE]},
+            {"left": "market_cap_basic", "operation": "in_range", "right": [MIN_MARKET_CAP, MAX_MARKET_CAP]}
         ],
         "options": {"lang": "en"},
         "symbols": {"query": {"types": []}, "tickers": []},
@@ -124,24 +121,19 @@ async def fetch_stock_data(session, symbol):
         return None
 
 # ================= CHECK STRATEGY =================
-def check_golden_cross_surge(data):
+def check_strategy(data):
     if not data:
-        return False
-    if not (MIN_PRICE <= data["price"] <= MAX_PRICE):
-        return False
-    if not (MIN_MARKET_CAP <= data["market_cap"] <= MAX_MARKET_CAP):
         return False
     if not (data["sma7"] > data["sma20"] > data["sma50"]):
         return False
-    if not (data["volume_spike"] >= VOLUME_SPIKE_MIN):
+    if data["volume_spike"] < VOLUME_SPIKE_MIN:
         return False
-    if not (data["avg_volume_10d"] >= MIN_VOLUME_10D):
+    if data["avg_volume_10d"] < MIN_VOLUME_10D:
         return False
     if not (MIN_RSI <= data["rsi"] <= MAX_RSI):
         return False
     return True
 
-# ================= CAN ALERT =================
 def can_alert(symbol):
     now = time.time()
     if symbol in ALERT_HISTORY:
@@ -150,17 +142,17 @@ def can_alert(symbol):
     ALERT_HISTORY[symbol] = now
     return True
 
-# ================= SCAN MARKET =================
-async def scan_market():
+# ================= SCAN =================
+async def scan():
     async with aiohttp.ClientSession() as session:
         symbols = await fetch_all_symbols(session)
         if not symbols:
-            print("⚠️ لا توجد أسهم، إعادة المحاولة...")
+            print("⚠️ لا توجد أسهم")
             return
-        print(f"✅ جاري فحص {len(symbols)} سهماً...")
+        print(f"✅ فحص {len(symbols)} سهماً...")
         for symbol in symbols:
             data = await fetch_stock_data(session, symbol)
-            if data and check_golden_cross_surge(data) and can_alert(symbol):
+            if data and check_strategy(data) and can_alert(symbol):
                 today = datetime.now().strftime("%Y-%m-%d")
                 DAILY_ALERTS[today] = DAILY_ALERTS.get(today, 0) + 1
                 msg = (
@@ -179,15 +171,15 @@ async def scan_market():
                     f"✅ فرصة Golden Cross مع سيولة قوية"
                 )
                 await send(msg)
-                print(f"📤 تم إرسال تنبيه لـ {symbol}")
+                print(f"📤 تم إرسال {symbol}")
             await asyncio.sleep(0.1)
 
-# ================= MAIN LOOP =================
+# ================= MAIN =================
 async def main():
     await send("🔥 *تم تشغيل Golden Cross Surge*")
-    print("🚀 بدء تشغيل Golden Cross Surge...")
+    print("🚀 بدء التشغيل...")
     while True:
-        await scan_market()
+        await scan()
         await asyncio.sleep(120)
 
 if __name__ == "__main__":
