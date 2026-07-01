@@ -2,8 +2,7 @@ import os
 import asyncio
 import aiohttp
 import time
-import yfinance as yf
-from datetime import datetime, timedelta
+from datetime import datetime
 from telegram import Bot
 from flask import Flask
 import threading
@@ -13,7 +12,7 @@ import pytz
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "🐉 M60 - Early Explosion Hunter (Live Pre-Market) is running", 200
+    return "🐉 M60 - The Hidden Hunter (Real-Time) is running", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -44,6 +43,8 @@ ALERT_COOLDOWN = 1800  # 30 دقيقة
 alert_history = {}
 alert_counters = {}
 last_reset_date = datetime.now(NY_TZ).date()
+price_cache = {}
+volume_cache = {}
 
 # ====================== TELEGRAM ================================
 async def send_telegram(msg):
@@ -53,108 +54,88 @@ async def send_telegram(msg):
     except Exception as e:
         print(f"❌ فشل الإرسال: {e}")
 
-# ====================== LIVE PRE-MARKET FETCHER =================
-async def fetch_premarket_data(symbol, session):
-    """جلب بيانات البري ماركت الفورية من TradingView"""
+# ====================== FETCH LIVE DATA =========================
+async def fetch_live_data(symbol, session):
+    """جلب البيانات الفورية من TradingView (بري ماركت + تداول)"""
     url = "https://scanner.tradingview.com/america/scan"
     payload = {
         "symbols": {"tickers": [symbol]},
-        "columns": ["close", "volume", "premarket_change"]
+        "columns": ["close", "volume", "change", "premarket_change"]
     }
     try:
         async with session.post(url, json=payload, timeout=5) as resp:
             data = await resp.json()
-            if data.get('data') and len(data['data'][0]['d']) >= 3:
+            if data.get('data') and len(data['data'][0]['d']) >= 4:
+                price = data['data'][0]['d'][0]
+                volume = data['data'][0]['d'][1]
+                change = data['data'][0]['d'][2]
+                premarket_change = data['data'][0]['d'][3]
                 return {
-                    "price": data['data'][0]['d'][0],
-                    "volume": data['data'][0]['d'][1],
-                    "change": data['data'][0]['d'][2]
+                    "price": price,
+                    "volume": volume,
+                    "change": change,
+                    "premarket_change": premarket_change
                 }
     except:
         pass
     return None
 
-# ====================== DETECT EARLY EXPLOSION ==================
-async def detect_early_explosion(symbol, session):
-    try:
-        # محاولة جلب البيانات من yfinance أولاً
-        stock = yf.Ticker(symbol)
-        hist = stock.history(period="5d", interval="1m")
-        
-        if hist.empty or len(hist) < 10:
-            # إذا فشل yfinance، استخدم المصدر البديل
-            alt_data = await fetch_premarket_data(symbol, session)
-            if not alt_data:
-                return None
-            # استخدام البيانات البديلة
-            price = alt_data["price"]
-            volume = alt_data["volume"]
-            premarket_change = alt_data["change"]
-            
-            # تقدير الحجم النسبي (نظراً لعدم وجود بيانات تاريخية كاملة)
-            volume_spike = 3.5  # افتراض ارتفاع حجم في البري ماركت
-            volume_acceleration = 2.0
-            first_minute_volume = volume
-            price_change = premarket_change
-        else:
-            # استخدام بيانات yfinance كالمعتاد
-            current = hist.iloc[-1]
-            price = current["Close"]
-            volume = current["Volume"]
-            high = current["High"]
-            low = current["Low"]
-
-            # الحجم النسبي
-            avg_volume_10 = hist["Volume"].iloc[-10:].mean()
-            volume_spike = volume / avg_volume_10 if avg_volume_10 > 0 else 0
-
-            # تسارع الحجم (أول دقيقة vs آخر 5 دقائق)
-            volume_last_5min = hist["Volume"].iloc[-5:].mean()
-            volume_acceleration = volume / volume_last_5min if volume_last_5min > 0 else 0
-
-            # سيولة أول دقيقة
-            first_minute_volume = hist["Volume"].iloc[-1]
-
-            # الزخم
-            price_change = ((price - hist["Close"].iloc[-2]) / hist["Close"].iloc[-2]) * 100 if len(hist) > 1 else 0
-
-        # ======== الأهداف ========
-        target1 = price * 1.05
-        target2 = price * 1.10
-        target3 = price * 1.20
-        stop_loss = price * 0.97
-
-        # ======== التحقق من الشروط ========
-        is_explosion = (
-            MIN_PRICE <= price <= MAX_PRICE and
-            volume_spike >= MIN_VOLUME_SPIKE and
-            volume_acceleration >= MIN_VOLUME_ACCELERATION and
-            first_minute_volume >= MIN_FIRST_MINUTE_VOLUME and
-            price_change > 0.5
-        )
-
-        if is_explosion:
-            now_ny = datetime.now(NY_TZ)
-            return {
-                "symbol": symbol,
-                "price": price,
-                "volume": volume,
-                "volume_spike": volume_spike,
-                "volume_acceleration": volume_acceleration,
-                "first_minute_volume": first_minute_volume,
-                "price_change": price_change,
-                "target1": target1,
-                "target2": target2,
-                "target3": target3,
-                "stop_loss": stop_loss,
-                "time": now_ny.strftime("%H:%M"),
-                "hour": now_ny.hour,
-                "minute": now_ny.minute
-            }
+# ====================== DETECT EXPLOSION ========================
+async def detect_explosion(symbol, session):
+    data = await fetch_live_data(symbol, session)
+    if not data:
         return None
-    except Exception as e:
-        print(f"⚠️ فشل فحص {symbol}: {e}")
+
+    price = data["price"]
+    volume = data["volume"]
+    premarket_change = data["premarket_change"]
+
+    if not price or not volume or price <= 0 or volume <= 0:
         return None
+
+    # الحجم النسبي (تقديري باستخدام آخر قيمة مخزنة)
+    last_volume = volume_cache.get(symbol, volume)
+    volume_spike = volume / last_volume if last_volume > 0 else 1.0
+    volume_cache[symbol] = volume
+
+    # تسارع الحجم (تقديري)
+    volume_acceleration = 2.0 if volume > last_volume * 1.5 else 1.0
+
+    # الزخم
+    price_change = premarket_change if premarket_change else data["change"]
+
+    # الأهداف
+    target1 = price * 1.05
+    target2 = price * 1.10
+    target3 = price * 1.20
+    stop_loss = price * 0.97
+
+    # الشروط
+    is_explosion = (
+        MIN_PRICE <= price <= MAX_PRICE and
+        volume_spike >= MIN_VOLUME_SPIKE and
+        volume_acceleration >= MIN_VOLUME_ACCELERATION and
+        volume >= MIN_FIRST_MINUTE_VOLUME and
+        price_change > 0.5
+    )
+
+    if is_explosion:
+        now_ny = datetime.now(NY_TZ)
+        return {
+            "symbol": symbol,
+            "price": price,
+            "volume": volume,
+            "volume_spike": volume_spike,
+            "volume_acceleration": volume_acceleration,
+            "first_minute_volume": volume,
+            "price_change": price_change,
+            "target1": target1,
+            "target2": target2,
+            "target3": target3,
+            "stop_loss": stop_loss,
+            "time": now_ny.strftime("%H:%M"),
+        }
+    return None
 
 def can_alert(symbol):
     now = time.time()
@@ -193,8 +174,8 @@ async def fetch_active_symbols(session):
 async def main_loop():
     global last_reset_date
 
-    await send_telegram("🔥 *M60 - Early Explosion Hunter (Live Pre-Market)*")
-    print("🚀 بدء العمل مع المصدر المزدوج...")
+    await send_telegram("🔥 *M60 - The Hidden Hunter (Real-Time)*")
+    print("🚀 بدء العمل مع المصدر المباشر...")
 
     while True:
         try:
@@ -207,11 +188,11 @@ async def main_loop():
                 symbols = await fetch_active_symbols(session)
                 if not symbols:
                     print("⚠️ لا توجد أسهم نشطة")
-                    await asyncio.sleep(60)
+                    await asyncio.sleep(30)
                     continue
 
                 print(f"🔍 فحص {len(symbols)} سهماً...")
-                tasks = [detect_early_explosion(symbol, session) for symbol in symbols]
+                tasks = [detect_explosion(symbol, session) for symbol in symbols]
                 results = await asyncio.gather(*tasks)
 
                 for data in results:
@@ -236,12 +217,12 @@ async def main_loop():
                         await send_telegram(msg)
                         await asyncio.sleep(1)
 
-                print(f"⏳ انتظار 60 ثانية...")
-                await asyncio.sleep(60)
+                print(f"⏳ انتظار 20 ثانية...")
+                await asyncio.sleep(20)
 
         except Exception as e:
             print(f"❌ خطأ رئيسي: {e}")
-            await asyncio.sleep(30)
+            await asyncio.sleep(10)
 
 if __name__ == "__main__":
     asyncio.run(main_loop())
