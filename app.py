@@ -3,7 +3,7 @@ import asyncio
 import aiohttp
 import time
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timedelta
 from telegram import Bot
 from flask import Flask
 import threading
@@ -13,7 +13,7 @@ import pytz
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "🐉 M60 - Real Liquidity Hunter is running", 200
+    return "🐉 M60 - Early Explosion Hunter is running", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -34,13 +34,11 @@ NY_TZ = pytz.timezone('America/New_York')
 
 # ====================== STRATEGY SETTINGS ======================
 MIN_PRICE = 0.5
-MAX_PRICE = 3.0
-MIN_VOLUME_SPIKE = 2.5
-MIN_VOLUME_ACCELERATION = 1.5
-MIN_CONSECUTIVE_ACCELERATION = 3
-SMA20_LOOKBACK = 20
-MAX_SPREAD_RATIO = 0.02
-ALERT_COOLDOWN = 1800
+MAX_PRICE = 10.0
+MIN_VOLUME_SPIKE = 3.0
+MIN_VOLUME_ACCELERATION = 2.0
+MIN_FIRST_MINUTE_VOLUME = 150000  # الحد الأدنى لحجم أول دقيقة
+ALERT_COOLDOWN = 1800  # 30 دقيقة
 
 # ====================== CACHE ===================================
 alert_history = {}
@@ -55,58 +53,51 @@ async def send_telegram(msg):
     except Exception as e:
         print(f"❌ فشل الإرسال: {e}")
 
-# ====================== DETECT LIQUIDITY =======================
-async def detect_real_liquidity(symbol):
+# ====================== DETECT EARLY EXPLOSION ==================
+async def detect_early_explosion(symbol):
     try:
         stock = yf.Ticker(symbol)
-        info = stock.info
-        hist = stock.history(period="2d", interval="5m")
-        if hist.empty or len(hist) < 20:
+        hist = stock.history(period="5d", interval="1m")  # دقيقة لدقة السيولة
+        if hist.empty or len(hist) < 10:
             return None
 
-        # البيانات الحالية
+        # ======== البيانات الحالية ========
         current = hist.iloc[-1]
         price = current["Close"]
         volume = current["Volume"]
         high = current["High"]
         low = current["Low"]
 
-        # الحجم النسبي
+        # ======== الحجم النسبي ========
         avg_volume_10 = hist["Volume"].iloc[-10:].mean()
         volume_spike = volume / avg_volume_10 if avg_volume_10 > 0 else 0
 
-        # تسارع الحجم (مقارنة بالشمعة السابقة)
-        prev_volume = hist["Volume"].iloc[-2] if len(hist) > 1 else volume
-        volume_acceleration = volume / prev_volume if prev_volume > 0 else 0
+        # ======== تسارع الحجم (أول دقيقة vs آخر 5 دقائق) ========
+        volume_last_5min = hist["Volume"].iloc[-5:].mean()
+        volume_acceleration = volume / volume_last_5min if volume_last_5min > 0 else 0
 
-        # استمرارية التسارع (آخر 3 شموع)
-        volumes = hist["Volume"].iloc[-4:].tolist()
-        consecutive_acceleration = all(volumes[i] > volumes[i-1] for i in range(1, len(volumes)))
+        # ======== سيولة أول دقيقة ========
+        first_minute_volume = hist["Volume"].iloc[-1]  # نفس الحجم الحالي (لأنه آخر دقيقة)
 
-        # SMA20
-        closes = hist["Close"].iloc[-SMA20_LOOKBACK:]
-        sma20 = closes.mean() if len(closes) >= SMA20_LOOKBACK else price
-        price_above_sma20 = price > sma20
+        # ======== الزخم ========
+        price_change = ((price - hist["Close"].iloc[-2]) / hist["Close"].iloc[-2]) * 100 if len(hist) > 1 else 0
 
-        # الفجوة السعرية (Spread)
-        spread = (high - low) / price if price > 0 else 1
-        low_spread = spread < MAX_SPREAD_RATIO
+        # ======== الأهداف ========
+        target1 = price * 1.05
+        target2 = price * 1.10
+        target3 = price * 1.20
+        stop_loss = price * 0.97
 
-        # الأخبار السلبية (محاكاة)
-        news_negative = False
-
-        # التحقق من شروط السيولة الحقيقية
-        is_real_liquidity = (
+        # ======== التحقق من الشروط ========
+        is_explosion = (
             MIN_PRICE <= price <= MAX_PRICE and
             volume_spike >= MIN_VOLUME_SPIKE and
             volume_acceleration >= MIN_VOLUME_ACCELERATION and
-            consecutive_acceleration and
-            price_above_sma20 and
-            low_spread and
-            not news_negative
+            first_minute_volume >= MIN_FIRST_MINUTE_VOLUME and
+            price_change > 0.5  # زخم إيجابي بسيط
         )
 
-        if is_real_liquidity:
+        if is_explosion:
             now_ny = datetime.now(NY_TZ)
             return {
                 "symbol": symbol,
@@ -114,9 +105,12 @@ async def detect_real_liquidity(symbol):
                 "volume": volume,
                 "volume_spike": volume_spike,
                 "volume_acceleration": volume_acceleration,
-                "consecutive_acceleration": consecutive_acceleration,
-                "sma20": sma20,
-                "spread": spread,
+                "first_minute_volume": first_minute_volume,
+                "price_change": price_change,
+                "target1": target1,
+                "target2": target2,
+                "target3": target3,
+                "stop_loss": stop_loss,
                 "time": now_ny.strftime("%H:%M"),
                 "hour": now_ny.hour,
                 "minute": now_ny.minute
@@ -154,7 +148,7 @@ async def fetch_active_symbols(session):
                 d = item['d']
                 if len(d) >= 3 and None not in [d[1], d[2]]:
                     symbols.append(d[0])
-            return symbols[:300]
+            return symbols[:200]  # زيادة السرعة
     except Exception as e:
         print(f"❌ فشل جلب القائمة: {e}")
         return []
@@ -163,7 +157,7 @@ async def fetch_active_symbols(session):
 async def main_loop():
     global last_reset_date
 
-    await send_telegram("🔥 *M60 - صياد السيولة الحقيقية (Real Liquidity Hunter)*")
+    await send_telegram("🔥 *M60 - Early Explosion Hunter (الانفجار المبكر)*")
     print("🚀 بدء العمل...")
 
     while True:
@@ -181,7 +175,7 @@ async def main_loop():
                     continue
 
                 print(f"🔍 فحص {len(symbols)} سهماً...")
-                tasks = [detect_real_liquidity(symbol) for symbol in symbols]
+                tasks = [detect_early_explosion(symbol) for symbol in symbols]
                 results = await asyncio.gather(*tasks)
 
                 for data in results:
@@ -190,17 +184,18 @@ async def main_loop():
                         alert_num = alert_counters[data["symbol"]]
 
                         msg = (
-                            f"💧 *سيولة حقيقية - دخول أموال ذكية*\n\n"
+                            f"💥 *انفجار مبكر - سيولة قوية*\n\n"
                             f"📊 الرمز: `{data['symbol']}`\n"
                             f"💰 السعر: `${data['price']:.2f}`\n"
                             f"📈 الحجم النسبي: `{data['volume_spike']:.1f}x`\n"
                             f"⚡ تسارع الحجم: `{data['volume_acceleration']:.1f}x`\n"
-                            f"📊 استمرار التسارع: `{'✅' if data['consecutive_acceleration'] else '❌'}`\n"
-                            f"📈 SMA20: `${data['sma20']:.2f}`\n"
-                            f"📉 الفجوة السعرية: `{data['spread']*100:.2f}%`\n"
+                            f"📊 سيولة أول دقيقة: `{data['first_minute_volume']:,}`\n"
+                            f"📈 الزخم: `+{data['price_change']:.2f}%`\n"
+                            f"🎯 الأهداف: `{data['target1']:.2f}` → `{data['target2']:.2f}` → `{data['target3']:.2f}`\n"
+                            f"🛑 وقف الخسارة: `{data['stop_loss']:.2f}`\n"
                             f"🕒 وقت الكشف (نيويورك): `{data['time']}`\n"
                             f"🔢 تنبيه #{alert_num} لهذا السهم\n\n"
-                            f"✅ سيولة حقيقية - راقب السهم فوراً"
+                            f"⚠️ راقب السهم فوراً"
                         )
                         await send_telegram(msg)
                         await asyncio.sleep(1)
