@@ -13,7 +13,7 @@ import pytz
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "🐉 M60 - Early Explosion Hunter (مشددة) is running", 200
+    return "🐉 M60 - Early Explosion Hunter (محدث) is running", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -33,20 +33,20 @@ bot = Bot(token=TOKEN)
 NY_TZ = pytz.timezone('America/New_York')
 
 # ====================== STRATEGY SETTINGS ======================
-MIN_PRICE = 1.0
-MAX_PRICE = 8.0
-MIN_VOLUME_SPIKE = 4.5
-MIN_VOLUME_ACCELERATION = 3.5
-MIN_FIRST_MINUTE_VOLUME = 400000
-MIN_VOLUME = 2_000_000
-ALERT_COOLDOWN = 3600  # ساعة
+MIN_PRICE = 0.5
+MAX_PRICE = 10.0
+MIN_VOLUME_SPIKE = 2.5
+MIN_VOLUME_ACCELERATION = 1.8
+MIN_VOLUME = 500000
+MIN_CHANGE = 0.8
+ALERT_COOLDOWN = 1800  # 30 دقيقة
 
 # ====================== CACHE ===================================
 alert_history = {}
 alert_counters = {}
 last_reset_date = datetime.now(NY_TZ).date()
-market_open_sent = False
-premarket_sent = False
+last_premarket_sent = False
+last_market_open_sent = False
 
 # ====================== TELEGRAM ================================
 async def send_telegram(msg):
@@ -60,7 +60,7 @@ async def send_telegram(msg):
 async def detect_early_explosion(symbol):
     try:
         stock = yf.Ticker(symbol)
-        hist = stock.history(period="5d", interval="1m")
+        hist = stock.history(period="5d", interval="5m")
         if hist.empty or len(hist) < 10:
             return None
 
@@ -71,10 +71,9 @@ async def detect_early_explosion(symbol):
         avg_volume_10 = hist["Volume"].iloc[-10:].mean()
         volume_spike = volume / avg_volume_10 if avg_volume_10 > 0 else 0
 
-        volume_last_5min = hist["Volume"].iloc[-5:].mean()
-        volume_acceleration = volume / volume_last_5min if volume_last_5min > 0 else 0
+        volume_last_5 = hist["Volume"].iloc[-5:].mean()
+        volume_acceleration = volume / volume_last_5 if volume_last_5 > 0 else 0
 
-        first_minute_volume = hist["Volume"].iloc[-1]
         price_change = ((price - hist["Close"].iloc[-2]) / hist["Close"].iloc[-2]) * 100 if len(hist) > 1 else 0
 
         target1 = price * 1.05
@@ -86,9 +85,8 @@ async def detect_early_explosion(symbol):
             MIN_PRICE <= price <= MAX_PRICE and
             volume_spike >= MIN_VOLUME_SPIKE and
             volume_acceleration >= MIN_VOLUME_ACCELERATION and
-            first_minute_volume >= MIN_FIRST_MINUTE_VOLUME and
             volume >= MIN_VOLUME and
-            price_change > 1.5
+            price_change > MIN_CHANGE
         )
 
         if is_explosion:
@@ -99,7 +97,6 @@ async def detect_early_explosion(symbol):
                 "volume": volume,
                 "volume_spike": volume_spike,
                 "volume_acceleration": volume_acceleration,
-                "first_minute_volume": first_minute_volume,
                 "price_change": price_change,
                 "target1": target1,
                 "target2": target2,
@@ -142,16 +139,16 @@ async def fetch_active_symbols(session):
                 d = item['d']
                 if len(d) >= 3 and None not in [d[1], d[2]]:
                     symbols.append(d[0])
-            return symbols[:120]
+            return symbols[:200]
     except Exception as e:
         print(f"❌ فشل جلب القائمة: {e}")
         return []
 
 # ====================== MAIN LOOP ===============================
 async def main_loop():
-    global last_reset_date, premarket_sent, market_open_sent
+    global last_reset_date, last_premarket_sent, last_market_open_sent
 
-    await send_telegram("🔥 *M60 - Early Explosion Hunter (مشددة)*")
+    await send_telegram("🔥 *M60 - Early Explosion Hunter (محدث)*")
     print("🚀 بدء العمل...")
 
     while True:
@@ -161,24 +158,27 @@ async def main_loop():
             now_minute = now_ny.minute
 
             # ======== رسائل الترحيب ========
-            if now_hour == 11 and now_minute == 0 and not premarket_sent:
+            if now_hour == 11 and now_minute == 0 and not last_premarket_sent:
                 await send_telegram("🌅 *بداية البري ماركت*")
-                premarket_sent = True
+                last_premarket_sent = True
+                print("✅ تم إرسال رسالة البري ماركت")
 
-            if now_hour == 16 and now_minute == 30 and not market_open_sent:
+            if now_hour == 16 and now_minute == 30 and not last_market_open_sent:
                 await send_telegram("🔔 *افتتاح السوق الرسمي*")
-                market_open_sent = True
+                last_market_open_sent = True
+                print("✅ تم إرسال رسالة افتتاح السوق")
 
             if now_hour == 0 and now_minute == 0:
-                premarket_sent = False
-                market_open_sent = False
+                last_premarket_sent = False
+                last_market_open_sent = False
 
             # ======== إعادة ضبط العدادات اليومية ========
             if now_ny.date() != last_reset_date:
                 alert_counters.clear()
                 last_reset_date = now_ny.date()
+                print("✅ تم إعادة ضبط العدادات اليومية")
 
-            # ======== الفحص ========
+            # ======== جلب الأسهم ========
             async with aiohttp.ClientSession() as session:
                 symbols = await fetch_active_symbols(session)
                 if not symbols:
@@ -186,7 +186,8 @@ async def main_loop():
                     await asyncio.sleep(30)
                     continue
 
-                print(f"🔍 فحص {len(symbols)} سهماً...")
+                print(f"🔍 جاري فحص {len(symbols)} سهماً...")
+
                 tasks = [detect_early_explosion(symbol) for symbol in symbols]
                 results = await asyncio.gather(*tasks)
 
@@ -201,7 +202,6 @@ async def main_loop():
                             f"💰 السعر: `${data['price']:.2f}`\n"
                             f"📈 الحجم النسبي: `{data['volume_spike']:.1f}x`\n"
                             f"⚡ تسارع الحجم: `{data['volume_acceleration']:.1f}x`\n"
-                            f"📊 سيولة أول دقيقة: `{data['first_minute_volume']:,}`\n"
                             f"📈 الزخم: `+{data['price_change']:.2f}%`\n"
                             f"🎯 الأهداف: `{data['target1']:.2f}` → `{data['target2']:.2f}` → `{data['target3']:.2f}`\n"
                             f"🛑 وقف الخسارة: `{data['stop_loss']:.2f}`\n"
@@ -210,6 +210,7 @@ async def main_loop():
                             f"⚠️ راقب السهم فوراً"
                         )
                         await send_telegram(msg)
+                        print(f"✅ تم إرسال تنبيه لـ {data['symbol']}")
                         await asyncio.sleep(1)
 
                 print(f"⏳ انتظار 60 ثانية...")
