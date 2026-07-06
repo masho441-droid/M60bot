@@ -31,6 +31,7 @@ if not TOKEN or not CHAT_ID:
 
 bot = Bot(token=TOKEN)
 NY_TZ = pytz.timezone('America/New_York')
+MAKKAH_TZ = pytz.timezone('Asia/Riyadh')
 
 # ====================== STRATEGY SETTINGS ======================
 MIN_PRICE = 0.5
@@ -44,7 +45,7 @@ ALERT_COOLDOWN = 1800  # 30 دقيقة
 # ====================== CACHE ===================================
 alert_history = {}
 alert_counters = {}
-last_reset_date = datetime.now(NY_TZ).date()
+last_reset_date = datetime.now(MAKKAH_TZ).date()
 last_premarket_sent = False
 last_market_open_sent = False
 
@@ -153,18 +154,18 @@ async def main_loop():
 
     while True:
         try:
-            now_ny = datetime.now(NY_TZ)
-            now_hour = now_ny.hour
-            now_minute = now_ny.minute
+            now_makkah = datetime.now(MAKKAH_TZ)
+            now_hour = now_makkah.hour
+            now_minute = now_makkah.minute
 
-            # ======== رسائل الترحيب ========
+            # ======== رسائل الترحيب بتوقيت مكة الصحيح ========
             if now_hour == 11 and now_minute == 0 and not last_premarket_sent:
-                await send_telegram("🌅 *بداية البري ماركت*")
+                await send_telegram("🌅 *بداية البري ماركت (11 ص بتوقيت مكة)*")
                 last_premarket_sent = True
                 print("✅ تم إرسال رسالة البري ماركت")
 
             if now_hour == 16 and now_minute == 30 and not last_market_open_sent:
-                await send_telegram("🔔 *افتتاح السوق الرسمي*")
+                await send_telegram("🔔 *افتتاح السوق الرسمي (4:30 م بتوقيت مكة)*")
                 last_market_open_sent = True
                 print("✅ تم إرسال رسالة افتتاح السوق")
 
@@ -173,9 +174,9 @@ async def main_loop():
                 last_market_open_sent = False
 
             # ======== إعادة ضبط العدادات اليومية ========
-            if now_ny.date() != last_reset_date:
+            if now_makkah.date() != last_reset_date:
                 alert_counters.clear()
-                last_reset_date = now_ny.date()
+                last_reset_date = now_makkah.date()
                 print("✅ تم إعادة ضبط العدادات اليومية")
 
             # ======== جلب الأسهم ========
