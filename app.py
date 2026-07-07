@@ -13,7 +13,7 @@ import pytz
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "🐉 M60 - Smart StockData Hunter is running", 200
+    return "🐉 M60 - Max StockData Hunter is running", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -41,7 +41,7 @@ MIN_VOLUME = 200000
 MIN_VOLUME_SPIKE = 5.0
 MIN_PRICE_CHANGE = 5.0
 ALERT_COOLDOWN = 1800  # 30 دقيقة
-SYMBOLS_LIMIT = 200
+SYMBOLS_LIMIT = 500    # ✅ زيادة العدد إلى 500
 
 # ====================== CACHE ===================================
 alert_history = {}
@@ -128,7 +128,6 @@ async def detect_explosion(quote):
         if not symbol or not price or not volume:
             return None
 
-        # جلب البيانات التاريخية (يتم تخزينها مؤقتاً لتقليل الطلبات)
         hist = await fetch_historical_data(symbol)
         if not hist:
             return None
@@ -183,8 +182,8 @@ def can_alert(symbol):
 async def main_loop():
     global last_reset_date, last_premarket_sent, last_market_open_sent
 
-    await send_telegram("🔥 *M60 - Smart StockData Hunter يعمل*")
-    print("🚀 بدء العمل مع طلب واحد لكل دورة...")
+    await send_telegram("🔥 *M60 - Max StockData Hunter يعمل*")
+    print("🚀 بدء العمل مع 500 سهم في طلب واحد...")
 
     while True:
         try:
@@ -212,21 +211,18 @@ async def main_loop():
                 print("✅ تم إعادة ضبط العدادات اليومية")
 
             async with aiohttp.ClientSession() as session:
-                # 1. جلب قائمة الأسهم (مجاني)
                 symbols = await fetch_active_symbols(session)
                 if not symbols:
                     print("⚠️ لا توجد أسهم نشطة")
                     await asyncio.sleep(30)
                     continue
 
-                # 2. طلب واحد لجميع الأسهم من StockData.org
                 quotes = await fetch_quotes(session, symbols)
                 if not quotes:
                     print("⚠️ لا توجد بيانات من StockData.org")
                     await asyncio.sleep(30)
                     continue
 
-                # 3. تحليل كل سهم محلياً (بدون طلبات إضافية)
                 for quote in quotes:
                     result = await detect_explosion(quote)
                     if result and can_alert(result["symbol"]):
@@ -250,7 +246,7 @@ async def main_loop():
                         print(f"✅ تم إرسال تنبيه لـ {result['symbol']}")
                         await asyncio.sleep(1)
 
-                print(f"⏳ انتظار 60 ثانية... (طلبات StockData: 1 لكل دورة)")
+                print(f"⏳ انتظار 60 ثانية... (500 سهم في طلب واحد)")
                 await asyncio.sleep(60)
 
         except Exception as e:
