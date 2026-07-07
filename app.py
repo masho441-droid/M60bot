@@ -13,7 +13,7 @@ import pytz
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "🐉 M60 - Early Explosion Hunter (محسن) is running", 200
+    return "🐉 M60 - Smart StockData Hunter is running", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -25,22 +25,23 @@ threading.Thread(target=run_web, daemon=True).start()
 # ====================== CONFIG ==================================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+STOCKDATA_TOKEN = os.getenv("STOCKDATA_TOKEN")
 
-if not TOKEN or not CHAT_ID:
-    raise ValueError("❌ TELEGRAM_TOKEN أو CHAT_ID غير موجودة")
+if not TOKEN or not CHAT_ID or not STOCKDATA_TOKEN:
+    raise ValueError("❌ TELEGRAM_TOKEN, CHAT_ID أو STOCKDATA_TOKEN غير موجودة")
 
 bot = Bot(token=TOKEN)
 NY_TZ = pytz.timezone('America/New_York')
 MAKKAH_TZ = pytz.timezone('Asia/Riyadh')
 
 # ====================== STRATEGY SETTINGS ======================
-MIN_PRICE = 0.5
-MAX_PRICE = 10.0
-MIN_VOLUME_SPIKE = 2.5
-MIN_VOLUME_ACCELERATION = 1.8
-MIN_VOLUME = 500000
-MIN_CHANGE = 0.8
+MIN_PRICE = 0.1
+MAX_PRICE = 5.0
+MIN_VOLUME = 200000
+MIN_VOLUME_SPIKE = 5.0
+MIN_PRICE_CHANGE = 5.0
 ALERT_COOLDOWN = 1800  # 30 دقيقة
+SYMBOLS_LIMIT = 200
 
 # ====================== CACHE ===================================
 alert_history = {}
@@ -57,97 +58,7 @@ async def send_telegram(msg):
     except Exception as e:
         print(f"❌ فشل الإرسال: {e}")
 
-# ====================== FETCH LIVE DATA ========================
-async def fetch_live_data(symbol):
-    try:
-        stock = yf.Ticker(symbol)
-        hist = stock.history(period="2d", interval="5m")
-        if hist.empty or len(hist) < 10:
-            return None
-
-        current = hist.iloc[-1]
-        price = current["Close"]
-        volume = current["Volume"]
-
-        # ======== حساب الحجم النسبي ========
-        avg_volume_10 = hist["Volume"].iloc[-10:].mean()
-        volume_spike = volume / avg_volume_10 if avg_volume_10 > 0 else 1.0
-
-        # ======== حساب تسارع الحجم ========
-        volume_last_5 = hist["Volume"].iloc[-5:].mean()
-        volume_acceleration = volume / volume_last_5 if volume_last_5 > 0 else 1.0
-
-        # ======== حساب الزخم ========
-        price_change = ((price - hist["Close"].iloc[-2]) / hist["Close"].iloc[-2]) * 100 if len(hist) > 1 else 0
-
-        return {
-            "price": price,
-            "volume": volume,
-            "volume_spike": volume_spike,
-            "volume_acceleration": volume_acceleration,
-            "price_change": price_change
-        }
-    except Exception as e:
-        print(f"⚠️ فشل جلب {symbol}: {e}")
-        return None
-
-# ====================== DETECT EARLY EXPLOSION ==================
-async def detect_early_explosion(symbol):
-    try:
-        data = await fetch_live_data(symbol)
-        if not data:
-            return None
-
-        price = data["price"]
-        volume = data["volume"]
-        volume_spike = data["volume_spike"]
-        volume_acceleration = data["volume_acceleration"]
-        price_change = data["price_change"]
-
-        target1 = price * 1.05
-        target2 = price * 1.10
-        target3 = price * 1.20
-        stop_loss = price * 0.97
-
-        is_explosion = (
-            MIN_PRICE <= price <= MAX_PRICE and
-            volume >= MIN_VOLUME and
-            volume_spike >= MIN_VOLUME_SPIKE and
-            volume_acceleration >= MIN_VOLUME_ACCELERATION and
-            price_change > MIN_CHANGE
-        )
-
-        if is_explosion:
-            now_ny = datetime.now(NY_TZ)
-            return {
-                "symbol": symbol,
-                "price": price,
-                "volume": volume,
-                "volume_spike": volume_spike,
-                "volume_acceleration": volume_acceleration,
-                "price_change": price_change,
-                "target1": target1,
-                "target2": target2,
-                "target3": target3,
-                "stop_loss": stop_loss,
-                "time": now_ny.strftime("%H:%M"),
-                "hour": now_ny.hour,
-                "minute": now_ny.minute
-            }
-        return None
-    except Exception as e:
-        print(f"⚠️ فشل فحص {symbol}: {e}")
-        return None
-
-def can_alert(symbol):
-    now = time.time()
-    if symbol in alert_history:
-        if now - alert_history[symbol] < ALERT_COOLDOWN:
-            return False
-    alert_history[symbol] = now
-    return True
-
-# ====================== FETCH SYMBOLS ===========================
+# ====================== FETCH SYMBOLS (TradingView) =============
 async def fetch_active_symbols(session):
     url = "https://scanner.tradingview.com/america/scan"
     payload = {
@@ -167,17 +78,113 @@ async def fetch_active_symbols(session):
                 d = item['d']
                 if len(d) >= 3 and None not in [d[1], d[2]]:
                     symbols.append(d[0])
-            return symbols[:200]
+            return symbols[:SYMBOLS_LIMIT]
     except Exception as e:
         print(f"❌ فشل جلب القائمة: {e}")
         return []
+
+# ====================== FETCH HISTORICAL DATA (yfinance) ========
+async def fetch_historical_data(symbol):
+    try:
+        stock = yf.Ticker(symbol)
+        hist = stock.history(period="1mo")
+        if hist.empty:
+            return None
+        avg_volume_10 = hist["Volume"].iloc[-10:].mean()
+        high_20d = hist["High"].iloc[-20:].max()
+        return {"avg_volume_10": avg_volume_10, "high_20d": high_20d}
+    except:
+        return None
+
+# ====================== FETCH QUOTES (StockData.org) ============
+async def fetch_quotes(session, symbols):
+    if not symbols:
+        return []
+    
+    symbols_param = ",".join(symbols)
+    url = f"https://api.stockdata.org/v1/data/quote?symbols={symbols_param}&api_token={STOCKDATA_TOKEN}&extended_hours=true"
+    
+    try:
+        async with session.get(url, timeout=10) as resp:
+            if resp.status != 200:
+                print(f"❌ فشل جلب البيانات: {resp.status}")
+                return []
+            data = await resp.json()
+            quotes = data.get('data', [])
+            print(f"✅ تم جلب {len(quotes)} سهماً من StockData.org")
+            return quotes
+    except Exception as e:
+        print(f"❌ خطأ في StockData.org: {e}")
+        return []
+
+# ====================== DETECT EXPLOSION ========================
+async def detect_explosion(quote):
+    try:
+        symbol = quote.get('symbol')
+        price = quote.get('price')
+        volume = quote.get('volume')
+        change = quote.get('change_percent', 0)
+
+        if not symbol or not price or not volume:
+            return None
+
+        # جلب البيانات التاريخية (يتم تخزينها مؤقتاً لتقليل الطلبات)
+        hist = await fetch_historical_data(symbol)
+        if not hist:
+            return None
+
+        avg_volume_10 = hist["avg_volume_10"]
+        high_20d = hist["high_20d"]
+
+        volume_spike = volume / avg_volume_10 if avg_volume_10 > 0 else 1.0
+        price_breakout = ((price - high_20d) / high_20d) * 100 if high_20d > 0 else 0
+
+        is_explosion = (
+            MIN_PRICE <= price <= MAX_PRICE and
+            volume >= MIN_VOLUME and
+            volume_spike >= MIN_VOLUME_SPIKE and
+            change > MIN_PRICE_CHANGE and
+            price > high_20d
+        )
+
+        if is_explosion:
+            target1 = price * 1.20
+            target2 = price * 1.50
+            target3 = price * 2.00
+            stop_loss = price * 0.95
+
+            return {
+                "symbol": symbol,
+                "price": price,
+                "volume": volume,
+                "volume_spike": volume_spike,
+                "price_change": change,
+                "price_breakout": price_breakout,
+                "target1": target1,
+                "target2": target2,
+                "target3": target3,
+                "stop_loss": stop_loss,
+                "time": datetime.now(NY_TZ).strftime("%H:%M")
+            }
+        return None
+    except Exception as e:
+        print(f"⚠️ خطأ في تحليل {quote.get('symbol')}: {e}")
+        return None
+
+def can_alert(symbol):
+    now = time.time()
+    if symbol in alert_history:
+        if now - alert_history[symbol] < ALERT_COOLDOWN:
+            return False
+    alert_history[symbol] = now
+    return True
 
 # ====================== MAIN LOOP ===============================
 async def main_loop():
     global last_reset_date, last_premarket_sent, last_market_open_sent
 
-    await send_telegram("🔥 *M60 - Early Explosion Hunter (محسن)*")
-    print("🚀 بدء العمل مع حساب القيم الفعلية...")
+    await send_telegram("🔥 *M60 - Smart StockData Hunter يعمل*")
+    print("🚀 بدء العمل مع طلب واحد لكل دورة...")
 
     while True:
         try:
@@ -205,40 +212,45 @@ async def main_loop():
                 print("✅ تم إعادة ضبط العدادات اليومية")
 
             async with aiohttp.ClientSession() as session:
+                # 1. جلب قائمة الأسهم (مجاني)
                 symbols = await fetch_active_symbols(session)
                 if not symbols:
                     print("⚠️ لا توجد أسهم نشطة")
                     await asyncio.sleep(30)
                     continue
 
-                print(f"🔍 جاري فحص {len(symbols)} سهماً...")
+                # 2. طلب واحد لجميع الأسهم من StockData.org
+                quotes = await fetch_quotes(session, symbols)
+                if not quotes:
+                    print("⚠️ لا توجد بيانات من StockData.org")
+                    await asyncio.sleep(30)
+                    continue
 
-                tasks = [detect_early_explosion(symbol) for symbol in symbols]
-                results = await asyncio.gather(*tasks)
-
-                for data in results:
-                    if data and can_alert(data["symbol"]):
-                        alert_counters[data["symbol"]] = alert_counters.get(data["symbol"], 0) + 1
-                        alert_num = alert_counters[data["symbol"]]
+                # 3. تحليل كل سهم محلياً (بدون طلبات إضافية)
+                for quote in quotes:
+                    result = await detect_explosion(quote)
+                    if result and can_alert(result["symbol"]):
+                        alert_counters[result["symbol"]] = alert_counters.get(result["symbol"], 0) + 1
+                        alert_num = alert_counters[result["symbol"]]
 
                         msg = (
-                            f"💥 *انفجار مبكر - سيولة قوية*\n\n"
-                            f"📊 الرمز: `{data['symbol']}`\n"
-                            f"💰 السعر: `${data['price']:.2f}`\n"
-                            f"📈 الحجم النسبي: `{data['volume_spike']:.1f}x`\n"
-                            f"⚡ تسارع الحجم: `{data['volume_acceleration']:.1f}x`\n"
-                            f"📈 الزخم: `+{data['price_change']:.2f}%`\n"
-                            f"🎯 الأهداف: `{data['target1']:.2f}` → `{data['target2']:.2f}` → `{data['target3']:.2f}`\n"
-                            f"🛑 وقف الخسارة: `{data['stop_loss']:.2f}`\n"
-                            f"🕒 وقت الكشف (نيويورك): `{data['time']}`\n"
+                            f"💥 *انفجار كبير - سيولة هائلة*\n\n"
+                            f"📊 الرمز: `{result['symbol']}`\n"
+                            f"💰 السعر: `${result['price']:.2f}`\n"
+                            f"📈 الحجم النسبي: `{result['volume_spike']:.1f}x`\n"
+                            f"📈 الزخم: `+{result['price_change']:.2f}%`\n"
+                            f"🚀 اختراق القمة: `+{result['price_breakout']:.1f}%`\n"
+                            f"🎯 الأهداف: `{result['target1']:.2f}` → `{result['target2']:.2f}` → `{result['target3']:.2f}`\n"
+                            f"🛑 وقف الخسارة: `{result['stop_loss']:.2f}`\n"
+                            f"🕒 وقت الكشف (نيويورك): `{result['time']}`\n"
                             f"🔢 تنبيه #{alert_num} لهذا السهم\n\n"
-                            f"⚠️ راقب السهم فوراً"
+                            f"⚠️ انفجار وشيك - راقب السهم فوراً"
                         )
                         await send_telegram(msg)
-                        print(f"✅ تم إرسال تنبيه لـ {data['symbol']}")
+                        print(f"✅ تم إرسال تنبيه لـ {result['symbol']}")
                         await asyncio.sleep(1)
 
-                print(f"⏳ انتظار 60 ثانية...")
+                print(f"⏳ انتظار 60 ثانية... (طلبات StockData: 1 لكل دورة)")
                 await asyncio.sleep(60)
 
         except Exception as e:
