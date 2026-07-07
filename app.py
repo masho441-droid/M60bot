@@ -2,6 +2,7 @@ import os
 import asyncio
 import aiohttp
 import time
+import yfinance as yf
 from datetime import datetime
 from telegram import Bot
 from flask import Flask
@@ -12,7 +13,7 @@ import pytz
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "🐉 M60 - Early Explosion Hunter (فوري) is running", 200
+    return "🐉 M60 - Early Explosion Hunter (محسن) is running", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -24,10 +25,9 @@ threading.Thread(target=run_web, daemon=True).start()
 # ====================== CONFIG ==================================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-STOCKDATA_TOKEN = os.getenv("STOCKDATA_TOKEN")  # يجب إضافته في Render
 
-if not TOKEN or not CHAT_ID or not STOCKDATA_TOKEN:
-    raise ValueError("❌ TELEGRAM_TOKEN, CHAT_ID أو STOCKDATA_TOKEN غير موجودة")
+if not TOKEN or not CHAT_ID:
+    raise ValueError("❌ TELEGRAM_TOKEN أو CHAT_ID غير موجودة")
 
 bot = Bot(token=TOKEN)
 NY_TZ = pytz.timezone('America/New_York')
@@ -57,24 +57,39 @@ async def send_telegram(msg):
     except Exception as e:
         print(f"❌ فشل الإرسال: {e}")
 
-# ====================== FETCH LIVE DATA (StockData.org) ======================
+# ====================== FETCH LIVE DATA ========================
 async def fetch_live_data(symbol):
-    url = f"https://api.stockdata.org/v1/data/quote?symbols={symbol}&api_token={STOCKDATA_TOKEN}&extended_hours=true"
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=5) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-                if data.get('data'):
-                    quote = data['data'][0]
-                    price = quote.get('price')
-                    volume = quote.get('volume')
-                    if price and volume:
-                        return {"price": price, "volume": volume}
-    except:
-        pass
-    return None
+        stock = yf.Ticker(symbol)
+        hist = stock.history(period="2d", interval="5m")
+        if hist.empty or len(hist) < 10:
+            return None
+
+        current = hist.iloc[-1]
+        price = current["Close"]
+        volume = current["Volume"]
+
+        # ======== حساب الحجم النسبي ========
+        avg_volume_10 = hist["Volume"].iloc[-10:].mean()
+        volume_spike = volume / avg_volume_10 if avg_volume_10 > 0 else 1.0
+
+        # ======== حساب تسارع الحجم ========
+        volume_last_5 = hist["Volume"].iloc[-5:].mean()
+        volume_acceleration = volume / volume_last_5 if volume_last_5 > 0 else 1.0
+
+        # ======== حساب الزخم ========
+        price_change = ((price - hist["Close"].iloc[-2]) / hist["Close"].iloc[-2]) * 100 if len(hist) > 1 else 0
+
+        return {
+            "price": price,
+            "volume": volume,
+            "volume_spike": volume_spike,
+            "volume_acceleration": volume_acceleration,
+            "price_change": price_change
+        }
+    except Exception as e:
+        print(f"⚠️ فشل جلب {symbol}: {e}")
+        return None
 
 # ====================== DETECT EARLY EXPLOSION ==================
 async def detect_early_explosion(symbol):
@@ -85,11 +100,9 @@ async def detect_early_explosion(symbol):
 
         price = data["price"]
         volume = data["volume"]
-
-        # حساب الحجم النسبي (تقريبي بدون بيانات تاريخية)
-        volume_spike = 2.5  # افتراضي
-        volume_acceleration = 1.8  # افتراضي
-        price_change = 2.0  # افتراضي (يمكن حسابه من بيانات سابقة)
+        volume_spike = data["volume_spike"]
+        volume_acceleration = data["volume_acceleration"]
+        price_change = data["price_change"]
 
         target1 = price * 1.05
         target2 = price * 1.10
@@ -99,6 +112,8 @@ async def detect_early_explosion(symbol):
         is_explosion = (
             MIN_PRICE <= price <= MAX_PRICE and
             volume >= MIN_VOLUME and
+            volume_spike >= MIN_VOLUME_SPIKE and
+            volume_acceleration >= MIN_VOLUME_ACCELERATION and
             price_change > MIN_CHANGE
         )
 
@@ -161,8 +176,8 @@ async def fetch_active_symbols(session):
 async def main_loop():
     global last_reset_date, last_premarket_sent, last_market_open_sent
 
-    await send_telegram("🔥 *M60 - Early Explosion Hunter (فوري)*")
-    print("🚀 بدء العمل مع StockData.org...")
+    await send_telegram("🔥 *M60 - Early Explosion Hunter (محسن)*")
+    print("🚀 بدء العمل مع حساب القيم الفعلية...")
 
     while True:
         try:
