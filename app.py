@@ -1,7 +1,7 @@
 import os
 import asyncio
-import aiohttp
 import time
+import yfinance as yf
 from datetime import datetime
 from telegram import Bot
 from flask import Flask
@@ -11,104 +11,78 @@ import pytz
 # ====================== CONFIG ==================================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-STOCKDATA_TOKEN = os.getenv("STOCKDATA_TOKEN")
-
 bot = Bot(token=TOKEN)
 NY_TZ = pytz.timezone('America/New_York')
 MAKKAH_TZ = pytz.timezone('Asia/Riyadh')
 
 # ====================== STRATEGY SETTINGS ======================
 MIN_PRICE = 0.5
-MAX_PRICE = 15.0
-MIN_VOLUME = 100000 # خفضتها قليلاً لضمان ظهور نتائج
-MIN_PRICE_CHANGE = 1.0 # خفضتها لـ 1% لتجربة التنبيهات
+MAX_PRICE = 10.0
+# تم ضبط الحجم ليكون مرناً بناءً على وقت السوق
+MIN_VOLUME_REGULAR = 500000
+MIN_VOLUME_PRE = 100000 
+MIN_CHANGE = 0.8
 ALERT_COOLDOWN = 1800 
 
-# ====================== WEB SERVER (Keep Alive) =================
-app = Flask(__name__)
-@app.route("/")
-def home(): return "M60 Hunter is Online", 200
-
-def run_web(): app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-threading.Thread(target=run_web, daemon=True).start()
-
-# ====================== FUNCTIONS ================================
-async def send_telegram(msg):
+# ====================== FETCH DATA IN BATCHES ==================
+async def fetch_data_batch(symbols):
+    """جلب بيانات مجموعة أسهم مع تفعيل بيانات البري ماركت"""
     try:
-        await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
+        results = {}
+        for symbol in symbols:
+            try:
+                # إضافة prepost=True هنا هو الجزء الأهم للبري ماركت
+                ticker = yf.Ticker(symbol)
+                hist = ticker.history(period="1d", interval="1m", prepost=True)
+                
+                if not hist.empty:
+                    current = hist.iloc[-1]
+                    results[symbol] = {"price": current["Close"], "volume": current["Volume"]}
+            except: continue
+        return results
     except Exception as e:
-        print(f"❌ خطأ تليجرام: {e}")
+        print(f"❌ خطأ في جلب البيانات: {e}")
+        return {}
 
-async def fetch_active_symbols(session):
-    url = "https://scanner.tradingview.com/america/scan"
-    payload = {
-        "filter": [{"left": "exchange", "operation": "in_range", "right": ["NASDAQ", "NYSE", "AMEX"]},
-                   {"left": "close", "operation": "in_range", "right": [MIN_PRICE, MAX_PRICE]}],
-        "options": {"lang": "en"},
-        "symbols": {"query": {"types": []}, "tickers": []},
-        "columns": ["name", "close", "volume"]
-    }
-    try:
-        async with session.post(url, json=payload, timeout=10) as resp:
-            data = await resp.json()
-            return [item['d'][0] for item in data.get('data', []) if item['d']]
-    except: return []
+# ====================== LOGIC HELPER ============================
+def is_premarket(now_makkah):
+    # وقت البري ماركت بتوقيت نيويورك: 4:00 ص - 9:30 ص
+    # بتوقيت مكة: 11:00 ص - 4:30 م
+    ny_time = now_makkah.astimezone(NY_TZ)
+    return 4 <= ny_time.hour < 9 or (ny_time.hour == 9 and ny_time.minute < 30)
 
-async def fetch_quotes(session, symbols):
-    # نأخذ أول 50 رمزاً فقط لتجنب تجاوز حد الـ API
-    symbols_subset = ",".join(symbols[:50])
-    url = f"https://api.stockdata.org/v1/data/quote?symbols={symbols_subset}&api_token={STOCKDATA_TOKEN}"
-    try:
-        async with session.get(url, timeout=10) as resp:
-            data = await resp.json()
-            return data.get('data', [])
-    except: return []
-
-async def detect_explosion(quote):
-    symbol = quote.get('symbol', 'N/A')
-    price = float(quote.get('price', 0))
-    volume = float(quote.get('volume', 0))
-    change = float(quote.get('change_percent', 0))
-
-    # طباعة الفحص في الـ Logs
-    print(f"🔍 فحص {symbol}: السعر={price}, الحجم={volume}, التغير={change}%")
-
-    if price >= MIN_PRICE and price <= MAX_PRICE and volume >= MIN_VOLUME and change >= MIN_PRICE_CHANGE:
-        return {
-            "symbol": symbol, "price": price, "volume": volume,
-            "change": change, "time": datetime.now(NY_TZ).strftime("%H:%M")
-        }
-    return None
-
+# ====================== MAIN LOOP ===============================
 async def main_loop():
     alert_history = {}
-    print("🚀 M60 Hunter يعمل الآن...")
-    await send_telegram("🤖 *M60 Hunter started successfully!*")
-
+    print("🚀 M60 Hunter يعمل (وضع البري ماركت المفعل)...")
+    
     while True:
         try:
-            async with aiohttp.ClientSession() as session:
-                symbols = await fetch_active_symbols(session)
-                quotes = await fetch_quotes(session, symbols)
+            now_makkah = datetime.now(MAKKAH_TZ)
+            current_min_volume = MIN_VOLUME_PRE if is_premarket(now_makkah) else MIN_VOLUME_REGULAR
+            
+            # جلب الرموز (تأكد من وجود دالة fetch_active_symbols هنا)
+            symbols = await fetch_active_symbols_simple() 
+            
+            batch_size = 20
+            for i in range(0, len(symbols), batch_size):
+                batch = symbols[i:i+batch_size]
+                data_map = await fetch_data_batch(batch)
                 
-                for quote in quotes:
-                    res = await detect_explosion(quote)
-                    if res:
-                        # فحص التكرار
-                        if time.time() - alert_history.get(res['symbol'], 0) > ALERT_COOLDOWN:
-                            msg = (f"💥 *انفجار في {res['symbol']}*\n"
-                                   f"💰 السعر: ${res['price']:.2f}\n"
-                                   f"📈 التغير: +{res['change']:.2f}%\n"
-                                   f"📊 الحجم: {res['volume']:,}\n"
-                                   f"🕒 الوقت: {res['time']} (NY)")
+                for symbol, data in data_map.items():
+                    price = data['price']
+                    volume = data['volume']
+                    
+                    if MIN_PRICE <= price <= MAX_PRICE and volume >= current_min_volume:
+                        if symbol not in alert_history or (time.time() - alert_history[symbol] > ALERT_COOLDOWN):
+                            msg = (f"💥 *انفجار في {'[PRE]' if is_premarket(now_makkah) else '[REG]'} {symbol}*\n"
+                                   f"💰 السعر: {price:.2f}\n📊 الحجم: {volume:,}")
                             await send_telegram(msg)
-                            alert_history[res['symbol']] = time.time()
-                            print(f"✅ تم إرسال تنبيه لـ {res['symbol']}")
-
+                            alert_history[symbol] = time.time()
+                
+                await asyncio.sleep(2) 
+            
             await asyncio.sleep(60)
         except Exception as e:
-            print(f"❌ خطأ في الحلقة الرئيسية: {e}")
+            print(f"❌ خطأ: {e}")
             await asyncio.sleep(60)
-
-if __name__ == "__main__":
-    asyncio.run(main_loop())
