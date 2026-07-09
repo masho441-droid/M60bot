@@ -18,7 +18,7 @@ logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "🐉 M60 - One Request Hunter is running safely", 200
+    return "🐉 M60 - Relative Volume Sniper is running safely", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -32,6 +32,7 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
+STOCKDATA_API_KEY = os.getenv("STOCKDATA_API_KEY")
 
 if not TOKEN or not CHAT_ID:
     print("⚠️ تحذير: TELEGRAM_TOKEN أو CHAT_ID غير موجودة في المتغيرات البيئية")
@@ -40,14 +41,13 @@ bot = Bot(token=TOKEN) if TOKEN else None
 NY_TZ = pytz.timezone('America/New_York')
 MAKKAH_TZ = pytz.timezone('Asia/Riyadh')
 
-# ====================== STRATEGY SETTINGS ======================
+# ====================== STRATEGY SETTINGS (RELATIVE BASED) ======
 MIN_PRICE = 0.5
 MAX_PRICE = 10.0
-MIN_VOLUME_SPIKE = 2.0
-MIN_VOLUME_ACCELERATION = 1.5
-MIN_VOLUME = 300000
-MIN_CHANGE = 0.6
-ALERT_COOLDOWN = 900  # 15 دقيقة تبريد لمنع التكرار المزعج
+MIN_VOLUME_SPIKE = 3.0          # الشمعة الحالية أعلى بـ 3 أضعاف (300%) من متوسط آخر 10 شموع
+MIN_VOLUME_ACCELERATION = 2.0   # الشمعة الحالية أعلى بضعفين (200%) من متوسط آخر 5 شموع
+MIN_CHANGE = 0.6                # نسبة التغير الإيجابي في الشمعة الأخيرة
+ALERT_COOLDOWN = 900            # 15 دقيقة تبريد لمنع التكرار المزعج
 SYMBOLS_LIMIT = 300
 
 # ====================== CACHE ===================================
@@ -101,9 +101,8 @@ async def fetch_active_symbols(session):
         print(f"❌ فشل جلب القائمة من TradingView: {e}")
         return []
 
-# ====================== LIVE VERIFICATION (SNIPER) ==============
+# ====================== LIVE VERIFICATION (TRIPLE SNIPER) =======
 async def verify_live_price(session, symbol):
-    # 1. القناص اللحظي عبر Finnhub
     if FINNHUB_API_KEY:
         url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_API_KEY}"
         try:
@@ -114,7 +113,6 @@ async def verify_live_price(session, symbol):
         except:
             pass
 
-    # 2. البديل عبر Polygon
     if POLYGON_API_KEY:
         url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/prev?adjusted=true&apiKey={POLYGON_API_KEY}"
         try:
@@ -122,6 +120,16 @@ async def verify_live_price(session, symbol):
                 data = await resp.json()
                 if "results" in data and len(data["results"]) > 0:
                     return data["results"][0].get("c")
+        except:
+            pass
+
+    if STOCKDATA_API_KEY:
+        url = f"https://api.stockdata.org/v1/data/quote?symbols={symbol}&api_token={STOCKDATA_API_KEY}"
+        try:
+            async with session.get(url, timeout=5) as resp:
+                data = await resp.json()
+                if "data" in data and len(data["data"]) > 0:
+                    return data["data"][0].get("price")
         except:
             pass
             
@@ -133,7 +141,6 @@ async def fetch_all_data(symbols):
         return {}
     
     try:
-        # جلب البيانات بشكل صامت (progress=False) وشامل لخارج أوقات التداول (prepost=True)
         data = yf.download(
             tickers=symbols,
             period="2d",
@@ -142,7 +149,7 @@ async def fetch_all_data(symbols):
             auto_adjust=True,
             threads=True,
             prepost=True,
-            progress=False  # تعطيل شريط التحميل المزعج وتنظيف الـ Logs
+            progress=False
         )
         
         results = {}
@@ -155,17 +162,18 @@ async def fetch_all_data(symbols):
                 else:
                     df = yf.Ticker(symbol).history(period="2d", interval="5m", prepost=True)
                 
-                if df is None or df.empty or len(df) < 5:
+                if df is None or df.empty or len(df) < 15: # تأكدنا من وجود شموع كافية للمقارنة
                     continue
                 
                 current = df.iloc[-1]
                 price = current["Close"]
                 volume = current["Volume"]
                 
-                avg_volume_10 = df["Volume"].iloc[-10:].mean()
+                # حساب حجم التداول بالنسبة للشموع السابقة مباشرة بدلاً من استخدام رقم ثابت
+                avg_volume_10 = df["Volume"].iloc[-11:-1].mean() # متوسط الـ 10 شموع السابقة دون الحالية
                 volume_spike = volume / avg_volume_10 if avg_volume_10 > 0 else 1.0
                 
-                volume_last_5 = df["Volume"].iloc[-5:].mean()
+                volume_last_5 = df["Volume"].iloc[-6:-1].mean()  # متوسط الـ 5 شموع السابقة دون الحالية
                 volume_acceleration = volume / volume_last_5 if volume_last_5 > 0 else 1.0
                 
                 price_change = ((price - df["Close"].iloc[-2]) / df["Close"].iloc[-2]) * 100 if len(df) > 1 else 0
@@ -183,7 +191,7 @@ async def fetch_all_data(symbols):
             except:
                 continue
         
-        print(f"📊 رادار ياهو: تم فحص {len(results)} سهماً بنجاح (تشمل أوقات خارج التداول)")
+        print(f"📊 رادار ياهو النسبي: تم فحص {len(results)} سهماً بنجاح.")
         return results
     except Exception as e:
         print(f"❌ خطأ في رادار جلب البيانات الرئيسي: {e}")
@@ -193,12 +201,13 @@ async def fetch_all_data(symbols):
 async def main_loop():
     global last_reset_date, last_premarket_sent, last_market_open_sent
 
-    await send_telegram("🔥 *M60 Hunter - النسخة الاحترافية المضادة للحظر تعمل الآن بكفاءة 100%*")
-    print("🚀 بدء العمل بالنسخة الاحترافية والنظيفة...")
+    await send_telegram("🔥 *M60 النسبي - صياد السيولة المباغتة يعمل الآن بنظام الأضعاف*")
+    print("🚀 بدء فحص الأسهم بناءً على طفرات الحجم النسبي...")
 
     while True:
         try:
             now_makkah = datetime.now(MAKKAH_TZ)
+            now_ny = datetime.now(NY_TZ)
             now_hour = now_makkah.hour
             now_minute = now_makkah.minute
 
@@ -219,6 +228,14 @@ async def main_loop():
                 last_reset_date = now_makkah.date()
                 print("♻️ تم إعادة ضبط العدادات اليومية تلقائياً")
 
+            # تحديد وضع السوق للاستخدام في رسالة التنبيه
+            if now_ny.hour < 9 or (now_ny.hour == 9 and now_ny.minute < 30):
+                market_status = "بري ماركت 🌅"
+            elif now_ny.hour >= 16:
+                market_status = "أفتر ماركت 🌙"
+            else:
+                market_status = "السوق الرسمي 🟢"
+
             async with aiohttp.ClientSession() as session:
                 symbols = await fetch_active_symbols(session)
                 if not symbols:
@@ -231,9 +248,9 @@ async def main_loop():
                     continue
 
                 for symbol, data in all_data.items():
+                    # التحقق من شروط الانفجار النسبي دون قيد الحجم الثابت
                     is_potential_explosion = (
                         MIN_PRICE <= data["price"] <= MAX_PRICE and
-                        data["volume"] >= MIN_VOLUME and
                         data["volume_spike"] >= MIN_VOLUME_SPIKE and
                         data["volume_acceleration"] >= MIN_VOLUME_ACCELERATION and
                         data["price_change"] > MIN_CHANGE and
@@ -241,7 +258,7 @@ async def main_loop():
                     )
 
                     if is_potential_explosion:
-                        # استدعاء القناص للتأكد من السعر اللحظي خارج أوقات التداول عبر مفاتيحك الخاصة
+                        # التحقق عبر القناص الثلاثي لضمان السعر الحقيقي
                         live_price = await verify_live_price(session, symbol)
                         final_price = live_price if live_price else data["price"]
                         
@@ -254,37 +271,30 @@ async def main_loop():
                             target3 = final_price * 1.20
                             stop_loss = final_price * 0.97
 
-                            now_ny = datetime.now(NY_TZ)
-                            market_status = "السوق الرسمي 🟢"
-                            if now_ny.hour < 9 or (now_ny.hour == 9 and now_ny.minute < 30):
-                                market_status = "بري ماركت 🌅"
-                            elif now_ny.hour >= 16:
-                                market_status = "أفتر ماركت 🌙"
-
                             msg = (
-                                f"💥 *انفجار مبكر - سيولة قوية*\n"
+                                f"💥 *طفرة سيولة نسبية - انفجار مباغت*\n"
                                 f"وضع السوق: {market_status}\n\n"
                                 f"📊 الرمز: `{symbol}`\n"
                                 f"💰 السعر المباشر: `${final_price:.2f}`\n"
-                                f"📈 الحجم النسبي: `{data['volume_spike']:.1f}x`\n"
-                                f"⚡ تسارع الحجم: `{data['volume_acceleration']:.1f}x`\n"
-                                f"📈 الزخم: `+{data['price_change']:.2f}%`\n"
+                                f"📈 حجم الشمعة الحالي: `{data['volume']:,}`\n"
+                                f"🚀 طفرة الحجم المفاجئة: `{data['volume_spike']:.1f}x` أضعاف العادي!\n"
+                                f"⚡ تسارع السيولة اللحظي: `{data['volume_acceleration']:.1f}x`\n"
+                                f"📈 زخم الشمعة: `+{data['price_change']:.2f}%`\n"
                                 f"📊 SMA20: `${data['sma20']:.2f}`\n"
                                 f"🎯 الأهداف: `{target1:.2f}` → `{target2:.2f}` → `{target3:.2f}`\n"
                                 f"🛑 وقف الخسارة: `{stop_loss:.2f}`\n"
                                 f"🕒 وقت نيويورك: `{now_ny.strftime('%H:%M')}`\n"
                                 f"🔢 تنبيه #{alert_num} لهذا السهم\n\n"
-                                f"⚠️ المصدر: API Live Verification"
+                                f"⚠️ المصدر: Triple API Sniper Mode"
                             )
                             await send_telegram(msg)
-                            print(f"🎯 قناص الانفجارات: تم تأكيد وإرسال تنبيه لـ {symbol}")
+                            print(f"🎯 قناص الانفجارات: تم اصطياد سهم نسبي {symbol}")
                             await asyncio.sleep(1)
 
-                # التوقيت المثالي لحماية الـ IP الخاص بالخادم من الحظر وضمان أقصى قدرة عمل مستمرة
                 await asyncio.sleep(120)
 
         except Exception as e:
-            print(f"⚠️ تنبيه النظام: حدث خطأ غير متوقع وتم تجاوزه: {e}")
+            print(f"⚠️ تنبيه النظام: حدث خطأ وتم تجاوزه: {e}")
             await asyncio.sleep(30)
 
 if __name__ == "__main__":
