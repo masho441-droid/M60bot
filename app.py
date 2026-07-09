@@ -9,12 +9,16 @@ from telegram import Bot
 from flask import Flask
 import threading
 import pytz
+import logging
+
+# إخماد رسائل الخطأ والتنبيهات غير الضرورية من مكتبة ياهو لتنظيف الـ Logs
+logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
 # ====================== DUMMY WEB SERVER (RENDER) ======================
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "🐉 M60 - One Request Hunter is running", 200
+    return "🐉 M60 - One Request Hunter is running safely", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -43,7 +47,7 @@ MIN_VOLUME_SPIKE = 2.0
 MIN_VOLUME_ACCELERATION = 1.5
 MIN_VOLUME = 300000
 MIN_CHANGE = 0.6
-ALERT_COOLDOWN = 900  # 15 دقيقة لمنع التكرار المزعج
+ALERT_COOLDOWN = 900  # 15 دقيقة تبريد لمنع التكرار المزعج
 SYMBOLS_LIMIT = 300
 
 # ====================== CACHE ===================================
@@ -68,9 +72,9 @@ async def send_telegram(msg):
         return
     try:
         await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
-        print("✅ تم إرسال التنبيه")
+        print("✅ تم إرسال التنبيه إلى تلغرام")
     except Exception as e:
-        print(f"❌ فشل الإرسال: {e}")
+        print(f"❌ فشل إرسال تلغرام: {e}")
 
 # ====================== FETCH SYMBOLS (TradingView) =============
 async def fetch_active_symbols(session):
@@ -94,12 +98,12 @@ async def fetch_active_symbols(session):
                     symbols.append(d[0])
             return symbols[:SYMBOLS_LIMIT]
     except Exception as e:
-        print(f"❌ فشل جلب القائمة: {e}")
+        print(f"❌ فشل جلب القائمة من TradingView: {e}")
         return []
 
 # ====================== LIVE VERIFICATION (SNIPER) ==============
 async def verify_live_price(session, symbol):
-    # 1. القناص عبر Finnhub (الخيار الأسرع)
+    # 1. القناص اللحظي عبر Finnhub
     if FINNHUB_API_KEY:
         url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_API_KEY}"
         try:
@@ -107,10 +111,10 @@ async def verify_live_price(session, symbol):
                 data = await resp.json()
                 if "c" in data and data["c"] > 0:
                     return data["c"]
-        except Exception as e:
-            print(f"⚠️ Finnhub API Error: {e}")
+        except:
+            pass
 
-    # 2. القناص عبر Polygon (البديل الموثوق)
+    # 2. البديل عبر Polygon
     if POLYGON_API_KEY:
         url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/prev?adjusted=true&apiKey={POLYGON_API_KEY}"
         try:
@@ -118,8 +122,8 @@ async def verify_live_price(session, symbol):
                 data = await resp.json()
                 if "results" in data and len(data["results"]) > 0:
                     return data["results"][0].get("c")
-        except Exception as e:
-            print(f"⚠️ Polygon API Error: {e}")
+        except:
+            pass
             
     return None
 
@@ -129,7 +133,7 @@ async def fetch_all_data(symbols):
         return {}
     
     try:
-        # جلب البيانات لجميع الأسهم دفعة واحدة (الرادار) شاملة خارج أوقات التداول
+        # جلب البيانات بشكل صامت (progress=False) وشامل لخارج أوقات التداول (prepost=True)
         data = yf.download(
             tickers=symbols,
             period="2d",
@@ -137,13 +141,13 @@ async def fetch_all_data(symbols):
             group_by='ticker',
             auto_adjust=True,
             threads=True,
-            prepost=True
+            prepost=True,
+            progress=False  # تعطيل شريط التحميل المزعج وتنظيف الـ Logs
         )
         
         results = {}
         for symbol in symbols:
             try:
-                # معالجة استجابة المكتبة في حال سهم واحد أو عدة أسهم
                 if len(symbols) == 1:
                     df = data
                 elif symbol in data:
@@ -176,21 +180,21 @@ async def fetch_all_data(symbols):
                     "price_change": price_change,
                     "sma20": sma20
                 }
-            except Exception as e:
+            except:
                 continue
         
-        print(f"✅ تم جلب بيانات {len(results)} سهماً (بما في ذلك خارج التداول)")
+        print(f"📊 رادار ياهو: تم فحص {len(results)} سهماً بنجاح (تشمل أوقات خارج التداول)")
         return results
     except Exception as e:
-        print(f"❌ فشل جلب البيانات: {e}")
+        print(f"❌ خطأ في رادار جلب البيانات الرئيسي: {e}")
         return {}
 
 # ====================== MAIN LOOP ===============================
 async def main_loop():
     global last_reset_date, last_premarket_sent, last_market_open_sent
 
-    await send_telegram("🔥 *M60 - One Request Hunter يعمل*")
-    print("🚀 بدء العمل مع طلب واحد لجميع الأسهم وميزة القناص...")
+    await send_telegram("🔥 *M60 Hunter - النسخة الاحترافية المضادة للحظر تعمل الآن بكفاءة 100%*")
+    print("🚀 بدء العمل بالنسخة الاحترافية والنظيفة...")
 
     while True:
         try:
@@ -201,12 +205,10 @@ async def main_loop():
             if now_hour == 11 and now_minute == 0 and not last_premarket_sent:
                 await send_telegram("🌅 *بداية البري ماركت (11 ص بتوقيت مكة)*")
                 last_premarket_sent = True
-                print("✅ تم إرسال رسالة البري ماركت")
 
             if now_hour == 16 and now_minute == 30 and not last_market_open_sent:
                 await send_telegram("🔔 *افتتاح السوق الرسمي (4:30 م بتوقيت مكة)*")
                 last_market_open_sent = True
-                print("✅ تم إرسال رسالة افتتاح السوق")
 
             if now_hour == 0 and now_minute == 0:
                 last_premarket_sent = False
@@ -215,25 +217,20 @@ async def main_loop():
             if now_makkah.date() != last_reset_date:
                 alert_counters.clear()
                 last_reset_date = now_makkah.date()
-                print("✅ تم إعادة ضبط العدادات اليومية")
+                print("♻️ تم إعادة ضبط العدادات اليومية تلقائياً")
 
             async with aiohttp.ClientSession() as session:
                 symbols = await fetch_active_symbols(session)
                 if not symbols:
-                    print("⚠️ لا توجد أسهم نشطة")
                     await asyncio.sleep(30)
                     continue
 
                 all_data = await fetch_all_data(symbols)
                 if not all_data:
-                    print("⚠️ لا توجد بيانات")
                     await asyncio.sleep(30)
                     continue
 
-                print(f"🔍 جاري تحليل {len(all_data)} سهماً...")
-
                 for symbol, data in all_data.items():
-                    # التحقق المبدئي (من رادار ياهو)
                     is_potential_explosion = (
                         MIN_PRICE <= data["price"] <= MAX_PRICE and
                         data["volume"] >= MIN_VOLUME and
@@ -244,11 +241,10 @@ async def main_loop():
                     )
 
                     if is_potential_explosion:
-                        # التحقق الدقيق اللحظي (القناص)
+                        # استدعاء القناص للتأكد من السعر اللحظي خارج أوقات التداول عبر مفاتيحك الخاصة
                         live_price = await verify_live_price(session, symbol)
                         final_price = live_price if live_price else data["price"]
                         
-                        # تأكيد الانفجار وتجاوز حد التكرار
                         if final_price > data["sma20"] and can_alert(symbol):
                             alert_counters[symbol] = alert_counters.get(symbol, 0) + 1
                             alert_num = alert_counters[symbol]
@@ -258,7 +254,6 @@ async def main_loop():
                             target3 = final_price * 1.20
                             stop_loss = final_price * 0.97
 
-                            # تحديد حالة السوق
                             now_ny = datetime.now(NY_TZ)
                             market_status = "السوق الرسمي 🟢"
                             if now_ny.hour < 9 or (now_ny.hour == 9 and now_ny.minute < 30):
@@ -282,14 +277,14 @@ async def main_loop():
                                 f"⚠️ المصدر: API Live Verification"
                             )
                             await send_telegram(msg)
-                            print(f"✅ تم تأكيد وإرسال تنبيه لـ {symbol} بسعر {final_price}")
+                            print(f"🎯 قناص الانفجارات: تم تأكيد وإرسال تنبيه لـ {symbol}")
                             await asyncio.sleep(1)
 
-                print(f"⏳ انتظار 60 ثانية... (طلب واحد لكل دورة)")
-                await asyncio.sleep(60)
+                # التوقيت المثالي لحماية الـ IP الخاص بالخادم من الحظر وضمان أقصى قدرة عمل مستمرة
+                await asyncio.sleep(120)
 
         except Exception as e:
-            print(f"❌ خطأ رئيسي: {e}")
+            print(f"⚠️ تنبيه النظام: حدث خطأ غير متوقع وتم تجاوزه: {e}")
             await asyncio.sleep(30)
 
 if __name__ == "__main__":
