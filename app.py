@@ -3,7 +3,7 @@ import time
 import requests
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
 # ==================== جلب المفاتيح من Render ====================
@@ -11,13 +11,8 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 POLYGON_KEY = os.environ.get("POLYGON_KEY")
 
-# ==================== التركيز على 3 رموز فقط ====================
-WATCHLIST = [
-    "I:SPX",  # مؤشر S&P 500
-    "SPY",    # صندوق S&P 500
-    "QQQ"     # صندوق Nasdaq 100
-]
-
+# ==================== التركيز على 3 رموز ====================
+WATCHLIST = ["I:SPX", "SPY", "QQQ"]
 NY_TZ = pytz.timezone('America/New_York')
 LAST_REPORT_DATE = None 
 
@@ -30,7 +25,6 @@ def send_telegram(message):
         print(f"خطأ تلقرام: {e}")
 
 def get_polygon_data(symbol):
-    """جلب البيانات اللحظية للتحليل"""
     end_time = int(time.time() * 1000)
     start_time = end_time - (120 * 60 * 1000) 
     url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/minute/{start_time}/{end_time}?apiKey={POLYGON_KEY}&limit=50"
@@ -42,13 +36,13 @@ def get_polygon_data(symbol):
             df.rename(columns={'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume', 't': 'time'}, inplace=True)
             return df
         return None
-    except Exception as e:
+    except:
         return None
 
-def get_daily_data(symbol):
-    """جلب البيانات اليومية للتقرير الصباحي"""
+def get_last_closed_daily_data(symbol):
+    """جلب بيانات الجلسة المغلقة السابقة (لتقرير اليوم)"""
     end_time = int(time.time() * 1000)
-    start_time = end_time - (5 * 24 * 60 * 60 * 1000) 
+    start_time = end_time - (10 * 24 * 60 * 60 * 1000) 
     url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/day/{start_time}/{end_time}?apiKey={POLYGON_KEY}"
     try:
         response = requests.get(url, timeout=10)
@@ -62,7 +56,6 @@ def get_daily_data(symbol):
         return None
 
 def calculate_indicators(df):
-    """حساب المؤشرات الفنية"""
     if df is None or len(df) < 20:
         return None
     df['EMA9'] = df['close'].ewm(span=9, adjust=False).mean()
@@ -76,9 +69,9 @@ def calculate_indicators(df):
     return df
 
 def send_morning_report():
-    """إرسال تقرير SPX الصباحي مع الدعوم والمقاومات"""
-    df = get_daily_data("I:SPX")
+    df = get_last_closed_daily_data("I:SPX")
     if df is None or len(df) < 2:
+        print("لا توجد بيانات كافية للتقرير.")
         return
 
     prev_day = df.iloc[-1]
@@ -86,6 +79,7 @@ def send_morning_report():
     high = prev_day['high']
     low = prev_day['low']
     
+    # حساب المستويات (Pivot Points)
     pivot = (high + low + prev_close) / 3
     r1 = (2 * pivot) - low
     s1 = (2 * pivot) - high
@@ -97,7 +91,7 @@ def send_morning_report():
     msg = f"""
 🌅 <b>التقرير الصباحي | S&P 500 (SPX)</b>
 
-<b>إغلاق الأمس:</b> {prev_close:.2f}
+<b>إغلاق الجلسة السابقة:</b> {prev_close:.2f}
 <b>الاتجاه المتوقع:</b> {trend}
 
 📊 <b>المستويات المهمة لليوم:</b>
@@ -118,7 +112,6 @@ def send_morning_report():
     print("✅ تم إرسال التقرير الصباحي")
 
 def analyze_symbol(symbol):
-    """تحليل الزخم اللحظي"""
     df = get_polygon_data(symbol)
     if df is None or len(df) < 20:
         return
@@ -161,7 +154,7 @@ def analyze_symbol(symbol):
         reasons.append("اختراق أعلى سعر للشمعة السابقة")
     elif current_price < prev['low']:
         score -= 20
-        reasons.append("كسر أدنى سعر للشمعة السابقة")
+        reasons.append("كسر أدنى سعر للشعبة السابقة")
 
     display_name = symbol.replace("I:", "")
     
@@ -197,22 +190,26 @@ def analyze_symbol(symbol):
 
 def main():
     global LAST_REPORT_DATE
-    print("🚀 البوت يعمل الآن (SPX, SPY, QQQ)...")
+    print("🚀 البوت يعمل (SPX, SPY, QQQ)...")
     
-    # إرسال رسالة الترحيب فور التشغيل
-    send_telegram("✅ <b>تم تشغيل النظام المطور بنجاح</b>\nالبوت الآن يراقب: SPX, SPY, QQQ\n(تقرير صباحي + إشارات زخم لحظية)")
+    # 1. إرسال رسالة الترحيب
+    send_telegram("✅ <b>تم تشغيل النظام</b>\nمراقبة: SPX, SPY, QQQ")
+    
+    # 2. إرسال التقرير فوراً عند التشغيل (للتجربة الآن)
+    send_morning_report()
+    LAST_REPORT_DATE = datetime.now(NY_TZ).strftime('%Y-%m-%d')
     
     while True:
         now = datetime.now(NY_TZ)
         
-        # التقرير الصباحي (9:00 صباحاً بتوقيت نيويورك)
+        # التقرير الصباحي المجدول (9:00 صباحاً بتوقيت نيويورك)
         if now.weekday() < 5 and now.hour == 9 and now.minute == 0:
             today_str = now.strftime('%Y-%m-%d')
             if LAST_REPORT_DATE != today_str:
                 send_morning_report()
                 LAST_REPORT_DATE = today_str
 
-        # اصطياد الزخم اللحظي (خلال ساعات السوق)
+        # اصطياد الزخم اللحظي
         if now.weekday() < 5 and (9 <= now.hour < 16): 
             for symbol in WATCHLIST:
                 analyze_symbol(symbol)
