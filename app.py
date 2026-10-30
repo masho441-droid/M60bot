@@ -13,8 +13,8 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 POLYGON_KEY = os.environ.get("POLYGON_KEY")
 
-# ==================== التركيز على 3 رموز ====================
-WATCHLIST = ["I:SPX", "SPY", "QQQ"]
+# ==================== المراقبة (استخدمنا SPY و QQQ) ====================
+WATCHLIST = ["SPY", "QQQ"]
 NY_TZ = pytz.timezone('America/New_York')
 LAST_REPORT_DATE = None 
 
@@ -84,15 +84,17 @@ def calculate_indicators(df):
     return df
 
 def send_morning_report():
-    df = get_last_closed_daily_data("I:SPX")
+    # نستخدم SPY لجلب البيانات (لأن المؤشرات غير مدعومة في الخطة المجانية)
+    df = get_last_closed_daily_data("SPY")
     if df is None or len(df) < 2:
-        send_telegram("⚠️ <b>فشل جلب بيانات التقرير.</b>\nتأكد أن المفتاح يدعم المؤشر I:SPX.")
+        send_telegram("⚠️ <b>فشل جلب بيانات التقرير.</b>")
         return
 
     prev_day = df.iloc[-1]
-    prev_close = prev_day['close']
-    high = prev_day['high']
-    low = prev_day['low']
+    # نضرب في 10 لأن SPX = SPY * 10 تقريباً
+    prev_close = prev_day['close'] * 10
+    high = prev_day['high'] * 10
+    low = prev_day['low'] * 10
     
     pivot = (high + low + prev_close) / 3
     r1 = (2 * pivot) - low
@@ -100,10 +102,11 @@ def send_morning_report():
     r2 = pivot + (high - low)
     s2 = pivot - (high - low)
 
-    trend = "صاعد 🟢" if prev_close > df.iloc[-2]['close'] else "هابط 🔴"
+    trend = "صاعد 🟢" if prev_close > (df.iloc[-2]['close'] * 10) else "هابط 🔴"
     
     msg = f"""
 🌅 <b>التقرير الصباحي | S&P 500 (SPX)</b>
+<i>(مستخرج من بيانات SPY)</i>
 
 <b>إغلاق الجلسة السابقة:</b> {prev_close:.2f}
 <b>الاتجاه المتوقع:</b> {trend}
@@ -119,10 +122,11 @@ def send_morning_report():
 • إذا اخترق السعر <b>{r1:.2f}</b> بحجم قوي ← استهدف <b>{r2:.2f}</b> (Call).
 • إذا كسر السعر <b>{s1:.2f}</b> بحجم قوي ← استهدف <b>{s2:.2f}</b> (Put).
 
-⚠️ <i>ليست نصيحة مالية. راقب السيولة عند التنفيذ.</i>
+⚠️ <i>ليست نصيحة مالية.</i>
 ⏱️ {datetime.now(NY_TZ).strftime('%Y-%m-%d')}
 """
     send_telegram(msg)
+    print("✅ تم إرسال التقرير الصباحي")
 
 def analyze_symbol(symbol):
     df = get_polygon_data(symbol)
@@ -184,6 +188,7 @@ def analyze_symbol(symbol):
 ⚠️ <i>ليست نصيحة مالية</i>
 """
         send_telegram(msg)
+        print(f"✅ CALL: {display_name}")
 
     elif score <= -50:
         msg = f"""
@@ -198,6 +203,7 @@ def analyze_symbol(symbol):
 ⚠️ <i>ليست نصيحة مالية</i>
 """
         send_telegram(msg)
+        print(f"✅ PUT: {display_name}")
 
 def main():
     global LAST_REPORT_DATE
@@ -207,7 +213,7 @@ def main():
     
     # 2. تشغيل البوت
     print("🚀 البوت يعمل...")
-    send_telegram("✅ <b>تم تشغيل النظام</b>\nمراقبة: SPX, SPY, QQQ")
+    send_telegram("✅ <b>تم تشغيل النظام</b>\nمراقبة: SPY, QQQ")
     
     # إرسال التقرير فور التشغيل
     send_morning_report()
