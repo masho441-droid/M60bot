@@ -21,9 +21,11 @@ LAST_REPORT_DATE = None
 
 # ==================== خادم ويب وهمي لإرضاء Render ====================
 app = Flask(__name__)
+
 @app.route('/')
 def health_check():
     return "Bot is running!", 200
+
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
@@ -38,7 +40,7 @@ def send_telegram(message):
         print(f"خطأ تلقرام: {e}")
 
 def get_polygon_data(symbol, interval="5"):
-    """جلب بيانات 5 دقائق لالتقاط الحركة السريعة"""
+    """جلب بيانات 5 دقائق"""
     end_time = int(time.time() * 1000)
     start_time = end_time - (240 * 60 * 1000) # آخر 4 ساعات
     url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/{interval}/minute/{start_time}/{end_time}?apiKey={POLYGON_KEY}&limit=50"
@@ -84,7 +86,7 @@ def calculate_indicators(df):
     return df
 
 def get_trend_30m(symbol):
-    """فلتر الاتجاه: جلب بيانات 30 دقيقة لتحديد الاتجاه العام"""
+    """فلتر الاتجاه العام (30 دقيقة)"""
     df = get_polygon_data(symbol, interval="30")
     if df is None or len(df) < 5:
         return "NEUTRAL"
@@ -129,17 +131,13 @@ def send_morning_report():
 🟢 <b>دعم 1:</b> {s1:.2f}
 🟢 <b>دعم 2:</b> {s2:.2f}
 
-🎯 <b>الاستراتيجية:</b>
-البوت سيراقب هذه المستويات. إذا اقترب السعر من مقاومة ولمخترقها بعد، سيرسل تنبيه (PUT). وإذا اقترب من دعم، سيرسل تنبيه (CALL).
+🎯 <b>الاستراتيجية:</b> البوت سيراقب هذه المستويات. عند لمسها وفشل الاختراق، سيصلك تنبيه فوري.
 """
     send_telegram(msg)
+    print("✅ تم إرسال التقرير الصباحي")
 
-# ==================== محرك الإشارات الاستباقي ====================
+# ==================== محرك الإشارات (الرفض والارتداد) ====================
 def analyze_symbol(symbol):
-    # 1. فلتر الاتجاه العام (30 دقيقة)
-    trend = get_trend_30m(symbol)
-    
-    # 2. بيانات التنفيذ (5 دقائق)
     df = get_polygon_data(symbol, interval="5")
     if df is None or len(df) < 20:
         return
@@ -148,71 +146,65 @@ def analyze_symbol(symbol):
         return
 
     last = df.iloc[-1]
+    prev = df.iloc[-2]
     current_price = last['close']
-    current_volume = last['volume']
-    avg_volume = df['volume'].iloc[-10:-1].mean()
     atr = last['ATR']
     
-    # تحديد مستويات المقاومة والدعم من آخر ساعتين (على فاصل 5 دقائق)
+    # تحديد مستويات المقاومة والدعم من آخر ساعتين (24 شمعة)
     recent_high = df['high'].iloc[-24:-1].max()
     recent_low = df['low'].iloc[-24:-1].min()
     
-    # المسافة من المقاومة والدعم
-    dist_to_res = abs(recent_high - current_price)
-    dist_to_sup = abs(current_price - recent_low)
+    # ==================== منطق PUT (رفض المقاومة) ====================
+    # الشرط: السعر لامس المقاومة في الشمعة الحالية أو السابقة، ثم أغلق تحتها
+    touched_res = (last['high'] >= recent_high) or (prev['high'] >= recent_high)
+    rejected = current_price < recent_high 
     
-    # إذا كان السعر قريباً جداً من المقاومة (على مسافة 0.2% أو أقل) ولم يخترقها
-    threshold = current_price * 0.002 
-    
-    if dist_to_res <= threshold and current_price < recent_high:
-        # إشارة استباقية (PUT) - فشل اختراق
-        if trend != "BULLISH": # لا نبيع إذا كان الاتجاه العام صاعداً بقوة
-            stop_loss = recent_high + (atr * 0.5)
-            t1 = current_price - (atr * 1.0)
-            t2 = current_price - (atr * 2.0)
-            t3 = current_price - (atr * 3.0)
-            
-            msg = f"""
-⚠️ <b>تنبيه استباقي: اقتراب من مقاومة | {symbol}</b>
-<b>السعر الحالي:</b> {current_price:.2f}
-<b>المقاومة:</b> {recent_high:.2f}
-<b>الاتجاه العام (30m):</b> {trend}
+    if touched_res and rejected:
+        stop_loss = recent_high + (atr * 0.5)
+        t1 = current_price - (atr * 1.0)
+        t2 = current_price - (atr * 2.0)
+        t3 = current_price - (atr * 3.0)
+        
+        msg = f"""
+🔴 <b>إشارة PUT: فشل اختراق المقاومة | {symbol}</b>
+<b>السعر:</b> {current_price:.2f}
+<b>المقاومة المرفوضة:</b> {recent_high:.2f}
 
-🔴 <b>احتمال فشل الاختراق ← إشارة PUT:</b>
 🎯 <b>الأهداف:</b> {t1:.2f} / {t2:.2f} / {t3:.2f}
 🛑 <b>وقف الخسارة:</b> {stop_loss:.2f}
 
-<b>الخطة:</b> راقب السعر. إذا فشل في اختراق {recent_high:.2f}، ادخل PUT.
-⏱️ {datetime.now(NY_TZ).strftime('%H:%M:%S')}
+<b>السبب:</b> السعر لامس المقاومة وتم رفضه بقوة.
+⏱️ {datetime.now(NY_TZ).strftime('%H:%M:%S')} (NY)
 ⚠️ <i>ليست نصيحة مالية</i>
 """
-            send_telegram(msg)
-            print(f"✅ Alert PUT: {symbol}")
+        send_telegram(msg)
+        print(f"✅ PUT Signal: {symbol}")
 
-    # إذا كان السعر قريباً جداً من الدعم ولم يكسرها
-    elif dist_to_sup <= threshold and current_price > recent_low:
-        if trend != "BEARISH": 
-            stop_loss = recent_low - (atr * 0.5)
-            t1 = current_price + (atr * 1.0)
-            t2 = current_price + (atr * 2.0)
-            t3 = current_price + (atr * 3.0)
-            
-            msg = f"""
-⚠️ <b>تنبيه استباقي: اقتراب من دعم | {symbol}</b>
-<b>السعر الحالي:</b> {current_price:.2f}
-<b>الدعم:</b> {recent_low:.2f}
-<b>الاتجاه العام (30m):</b> {trend}
+    # ==================== منطق CALL (ارتداد من الدعم) ====================
+    # الشرط: السعر لامس الدعم في الشمعة الحالية أو السابقة، ثم أغلق فوقه
+    touched_sup = (last['low'] <= recent_low) or (prev['low'] <= recent_low)
+    bounced = current_price > recent_low 
+    
+    if touched_sup and bounced:
+        stop_loss = recent_low - (atr * 0.5)
+        t1 = current_price + (atr * 1.0)
+        t2 = current_price + (atr * 2.0)
+        t3 = current_price + (atr * 3.0)
+        
+        msg = f"""
+🟢 <b>إشارة CALL: ارتداد من الدعم | {symbol}</b>
+<b>السعر:</b> {current_price:.2f}
+<b>الدعم المرتد منه:</b> {recent_low:.2f}
 
-🟢 <b>احتمال الارتداد ← إشارة CALL:</b>
 🎯 <b>الأهداف:</b> {t1:.2f} / {t2:.2f} / {t3:.2f}
 🛑 <b>وقف الخسارة:</b> {stop_loss:.2f}
 
-<b>الخطة:</b> راقب السعر. إذا ارتد من {recent_low:.2f}، ادخل CALL.
-⏱️ {datetime.now(NY_TZ).strftime('%H:%M:%S')}
+<b>السبب:</b> السعر لامس الدعم وارتد منه بقوة.
+⏱️ {datetime.now(NY_TZ).strftime('%H:%M:%S')} (NY)
 ⚠️ <i>ليست نصيحة مالية</i>
 """
-            send_telegram(msg)
-            print(f"✅ Alert CALL: {symbol}")
+        send_telegram(msg)
+        print(f"✅ CALL Signal: {symbol}")
 
 # ==================== التشغيل الرئيسي ====================
 def main():
@@ -220,8 +212,8 @@ def main():
     
     threading.Thread(target=run_web_server, daemon=True).start()
     
-    print("🚀 محرك الإشارات الاستباقي يعمل...")
-    send_telegram("✅ <b>تم تشغيل نظام التنبيهات الاستباقية</b>\nالبوت يراقب اقتراب السعر من المقاومات والدعوم.")
+    print("🚀 محرك الإشارات (الرفض والارتداد) يعمل...")
+    send_telegram("✅ <b>تم تشغيل نظام الإشارات</b>\nالبوت يراقب مستويات الدعم والمقاومة ويرسل تنبيهاً فور لمسها.")
     
     send_morning_report()
     LAST_REPORT_DATE = datetime.now(NY_TZ).strftime('%Y-%m-%d')
@@ -235,13 +227,12 @@ def main():
                 send_morning_report()
                 LAST_REPORT_DATE = today_str
 
-        # التداول فقط في أول ساعتين ونصف (لتجنب عشوائية آخر الجلسة)
-        if now.weekday() < 5 and (9 <= now.hour < 12): 
+        if now.weekday() < 5 and (9 <= now.hour < 16): 
             for symbol in WATCHLIST:
                 analyze_symbol(symbol)
                 time.sleep(3)
         else:
-            print(f"⏳ خارج وقت التداول الأمثل ({now.strftime('%H:%M')} NY)")
+            print(f"⏳ السوق مغلق ({now.strftime('%H:%M')} NY)")
         
         time.sleep(60)
 
