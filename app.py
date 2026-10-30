@@ -1,211 +1,88 @@
 import os
-import asyncio
-import aiohttp
 import time
+import requests
 from datetime import datetime
-from telegram import Bot
-from flask import Flask
-import threading
 import pytz
 
-# ====================== DUMMY WEB SERVER ======================
-app = Flask(__name__)
-@app.route("/")
-def home():
-    return "🐉 M60 - Fixed Symbols Hunter is running", 200
+# ==================== جلب المفاتيح من Render ====================
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID = os.environ.get("CHAT_ID")
+POLYGON_KEY = os.environ.get("POLYGON_KEY")
 
-def run_web():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
-
-threading.Thread(target=run_web, daemon=True).start()
-# ===============================================================
-
-# ====================== CONFIG ==================================
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-STOCKDATA_TOKEN = os.getenv("STOCKDATA_TOKEN")
-
-if not TOKEN or not CHAT_ID or not STOCKDATA_TOKEN:
-    raise ValueError("❌ TELEGRAM_TOKEN, CHAT_ID أو STOCKDATA_TOKEN غير موجودة")
-
-bot = Bot(token=TOKEN)
-NY_TZ = pytz.timezone('America/New_York')
-MAKKAH_TZ = pytz.timezone('Asia/Riyadh')
-
-# ====================== STRATEGY SETTINGS ======================
-MIN_PRICE = 0.1
-MAX_PRICE = 5.0
-MIN_VOLUME = 200000
-MIN_VOLUME_SPIKE = 5.0
-MIN_PRICE_CHANGE = 5.0
-ALERT_COOLDOWN = 1800  # 30 دقيقة
-
-# ====================== FIXED SYMBOLS LIST ======================
-SYMBOLS = [
-    "YMAT", "RBNE", "ENLV", "PFSA", "NCRA", "CGTL", "SRXH", "SNAL", "SLAI",
-    "NVVE", "NTCL", "NIVF", "NIPG", "JZ", "INLF", "HKIT", "CRIS", "ABTC",
-    "GMEX", "RMTI", "MQ", "ALIT", "TRNR", "QNCX", "JBDI", "HCWB", "ZCMD",
-    "PAVS", "MNDR", "GIBO", "GDC", "VRAX", "RUBI", "NUWE", "AMIX", "YYGH",
-    "ILLR", "FCUV", "WLDS", "POM", "LHSW", "LABT", "BOXL", "BMGL", "WOK",
-    "FRTK", "MIMI", "SOBR"
+# ==================== قائمة المراقبة (15 رمزاً) ====================
+WATCHLIST = [
+    "I:SPX", "I:NDX", # المؤشرات الرئيسية (S&P 500 و Nasdaq 100)
+    "SPY", "QQQ", "IWM", "DIA", # الصناديق المتداولة (للمضاربة)
+    "AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "META", "GOOGL", "AMD", "NFLX", "PLTR", "COIN" # الشركات الكبرى
 ]
 
-# ====================== CACHE ===================================
-alert_history = {}
-alert_counters = {}
-last_reset_date = datetime.now(MAKKAH_TZ).date()
-last_premarket_sent = False
-last_market_open_sent = False
+# ==================== إعدادات البوت ====================
+NY_TZ = pytz.timezone('America/New_York')
 
-# ====================== TELEGRAM ================================
-async def send_telegram(msg):
+def send_telegram(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
     try:
-        await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
-        print("✅ تم إرسال التنبيه")
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"❌ فشل الإرسال: {e}")
+        print(f"خطأ في تلقرام: {e}")
 
-# ====================== FETCH QUOTES (StockData.org) ============
-async def fetch_quotes(session):
-    if not SYMBOLS:
-        return []
+def get_stock_data(symbol):
+    # تعديل بسيط: المؤشرات في Polygon تحتاج صيغة معينة، لكن v2/aggs تعمل معها
+    end_time = int(time.time() * 1000)
+    start_time = end_time - (5 * 60 * 1000) 
     
-    symbols_param = ",".join(SYMBOLS)
-    url = f"https://api.stockdata.org/v1/data/quote?symbols={symbols_param}&api_token={STOCKDATA_TOKEN}&extended_hours=true"
+    url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/minute/{start_time}/{end_time}?apiKey={POLYGON_KEY}"
     
     try:
-        async with session.get(url, timeout=10) as resp:
-            if resp.status != 200:
-                print(f"❌ فشل جلب البيانات: {resp.status}")
-                return []
-            data = await resp.json()
-            quotes = data.get('data', [])
-            print(f"✅ تم جلب {len(quotes)} سهماً من StockData.org")
-            return quotes
-    except Exception as e:
-        print(f"❌ خطأ في StockData.org: {e}")
-        return []
-
-# ====================== DETECT EXPLOSION ========================
-def detect_explosion(quote):
-    try:
-        symbol = quote.get('symbol')
-        price = quote.get('price')
-        volume = quote.get('volume')
-        change = quote.get('change_percent', 0)
-
-        if not symbol or not price or not volume:
-            return None
-
-        volume_spike = 3.0  # افتراضي (يمكن حسابه من بيانات تاريخية)
-
-        target1 = price * 1.20
-        target2 = price * 1.50
-        target3 = price * 2.00
-        stop_loss = price * 0.95
-
-        is_explosion = (
-            MIN_PRICE <= price <= MAX_PRICE and
-            volume >= MIN_VOLUME and
-            volume_spike >= MIN_VOLUME_SPIKE and
-            change > MIN_PRICE_CHANGE
-        )
-
-        if is_explosion:
-            now_ny = datetime.now(NY_TZ)
-            return {
-                "symbol": symbol,
-                "price": price,
-                "volume": volume,
-                "volume_spike": volume_spike,
-                "price_change": change,
-                "target1": target1,
-                "target2": target2,
-                "target3": target3,
-                "stop_loss": stop_loss,
-                "time": now_ny.strftime("%H:%M")
-            }
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        if data.get('results'):
+            return data['results']
         return None
     except Exception as e:
-        print(f"⚠️ خطأ في تحليل {quote.get('symbol')}: {e}")
+        print(f"خطأ في جلب {symbol}: {e}")
         return None
 
-def can_alert(symbol):
-    now = time.time()
-    if symbol in alert_history:
-        if now - alert_history[symbol] < ALERT_COOLDOWN:
-            return False
-    alert_history[symbol] = now
-    return True
+def analyze_symbol(symbol):
+    bars = get_stock_data(symbol)
+    if not bars or len(bars) < 3:
+        return
 
-# ====================== MAIN LOOP ===============================
-async def main_loop():
-    global last_reset_date, last_premarket_sent, last_market_open_sent
+    current_bar = bars[-1]
+    current_price = current_bar['c']
+    current_volume = current_bar['v']
+    
+    recent_high = max([b['h'] for b in bars[:-1]])
+    recent_low = min([b['l'] for b in bars[:-1]])
+    avg_volume = sum([b['v'] for b in bars[:-1]]) / max(len(bars[:-1]), 1)
 
-    await send_telegram("🔥 *M60 - Fixed Symbols Hunter يعمل*")
-    print("🚀 بدء العمل مع قائمة ثابتة...")
+    # تنظيف اسم الرمز للعرض في تلقرام (إزالة I:)
+    display_name = symbol.replace("I:", "")
 
+    if current_price > recent_high and current_volume > (avg_volume * 1.5):
+        send_telegram(f"🟢 <b>إشارة CALL</b> | {display_name}\nالسعر: {current_price:.2f} (اختراق صعودي)\nالحجم: {current_volume/avg_volume:.1f}x\n⏱️ {datetime.now(NY_TZ).strftime('%H:%M:%S')}")
+        print(f"CALL Signal: {display_name}")
+
+    elif current_price < recent_low and current_volume > (avg_volume * 1.5):
+        send_telegram(f"🔴 <b>إشارة PUT</b> | {display_name}\nالسعر: {current_price:.2f} (كسر هبوطي)\nالحجم: {current_volume/avg_volume:.1f}x\n⏱️ {datetime.now(NY_TZ).strftime('%H:%M:%S')}")
+        print(f"PUT Signal: {display_name}")
+
+def main():
+    print("🚀 البوت يعمل الآن...")
+    send_telegram("✅ <b>تم تشغيل البوت</b>\nيتم الآن مراقبة SPX و NDX والشركات الكبرى.")
+    
     while True:
-        try:
-            now_makkah = datetime.now(MAKKAH_TZ)
-            now_hour = now_makkah.hour
-            now_minute = now_makkah.minute
-
-            if now_hour == 11 and now_minute == 0 and not last_premarket_sent:
-                await send_telegram("🌅 *بداية البري ماركت (11 ص بتوقيت مكة)*")
-                last_premarket_sent = True
-                print("✅ تم إرسال رسالة البري ماركت")
-
-            if now_hour == 16 and now_minute == 30 and not last_market_open_sent:
-                await send_telegram("🔔 *افتتاح السوق الرسمي (4:30 م بتوقيت مكة)*")
-                last_market_open_sent = True
-                print("✅ تم إرسال رسالة افتتاح السوق")
-
-            if now_hour == 0 and now_minute == 0:
-                last_premarket_sent = False
-                last_market_open_sent = False
-
-            if now_makkah.date() != last_reset_date:
-                alert_counters.clear()
-                last_reset_date = now_makkah.date()
-                print("✅ تم إعادة ضبط العدادات اليومية")
-
-            async with aiohttp.ClientSession() as session:
-                quotes = await fetch_quotes(session)
-                if not quotes:
-                    print("⚠️ لا توجد بيانات من StockData.org")
-                    await asyncio.sleep(30)
-                    continue
-
-                for quote in quotes:
-                    result = detect_explosion(quote)
-                    if result and can_alert(result["symbol"]):
-                        alert_counters[result["symbol"]] = alert_counters.get(result["symbol"], 0) + 1
-                        alert_num = alert_counters[result["symbol"]]
-
-                        msg = (
-                            f"💥 *انفجار مبكر - سيولة قوية*\n\n"
-                            f"📊 الرمز: `{result['symbol']}`\n"
-                            f"💰 السعر: `${result['price']:.2f}`\n"
-                            f"📈 الحجم النسبي: `{result['volume_spike']:.1f}x`\n"
-                            f"📈 الزخم: `+{result['price_change']:.2f}%`\n"
-                            f"🎯 الأهداف: `{result['target1']:.2f}` → `{result['target2']:.2f}` → `{result['target3']:.2f}`\n"
-                            f"🛑 وقف الخسارة: `{result['stop_loss']:.2f}`\n"
-                            f"🕒 وقت الكشف (نيويورك): `{result['time']}`\n"
-                            f"🔢 تنبيه #{alert_num} لهذا السهم\n\n"
-                            f"⚠️ راقب السهم فوراً"
-                        )
-                        await send_telegram(msg)
-                        print(f"✅ تم إرسال تنبيه لـ {result['symbol']}")
-                        await asyncio.sleep(1)
-
-                print(f"⏳ انتظار 60 ثانية...")
-                await asyncio.sleep(60)
-
-        except Exception as e:
-            print(f"❌ خطأ رئيسي: {e}")
-            await asyncio.sleep(30)
+        now = datetime.now(NY_TZ)
+        # مراقبة السوق من 9:30 صباحاً إلى 4:00 مساءً (نيويورك)
+        if now.weekday() < 5 and (9 <= now.hour < 16): 
+            for symbol in WATCHLIST:
+                analyze_symbol(symbol)
+                time.sleep(0.5) 
+        else:
+            print(f"⏳ السوق مغلق حالياً ({now.strftime('%H:%M')})")
+        
+        time.sleep(60)
 
 if __name__ == "__main__":
-    asyncio.run(main_loop())
+    main()
