@@ -5,6 +5,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import pytz
+from flask import Flask
+import threading
 
 # ==================== جلب المفاتيح من Render ====================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -16,6 +18,18 @@ WATCHLIST = ["I:SPX", "SPY", "QQQ"]
 NY_TZ = pytz.timezone('America/New_York')
 LAST_REPORT_DATE = None 
 
+# ==================== خادم ويب وهمي لإرضاء Render ====================
+app = Flask(__name__)
+
+@app.route('/')
+def health_check():
+    return "Bot is running!", 200
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+# ==================== دوال البوت ====================
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
@@ -25,6 +39,7 @@ def send_telegram(message):
         print(f"خطأ تلقرام: {e}")
 
 def get_polygon_data(symbol):
+    """جلب البيانات اللحظية"""
     end_time = int(time.time() * 1000)
     start_time = end_time - (120 * 60 * 1000) 
     url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/minute/{start_time}/{end_time}?apiKey={POLYGON_KEY}&limit=50"
@@ -40,7 +55,7 @@ def get_polygon_data(symbol):
         return None
 
 def get_last_closed_daily_data(symbol):
-    """جلب بيانات الجلسة المغلقة السابقة (لتقرير اليوم)"""
+    """جلب بيانات الجلسة المغلقة السابقة (للتقرير)"""
     end_time = int(time.time() * 1000)
     start_time = end_time - (10 * 24 * 60 * 60 * 1000) 
     url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/day/{start_time}/{end_time}?apiKey={POLYGON_KEY}"
@@ -71,7 +86,7 @@ def calculate_indicators(df):
 def send_morning_report():
     df = get_last_closed_daily_data("I:SPX")
     if df is None or len(df) < 2:
-        print("لا توجد بيانات كافية للتقرير.")
+        send_telegram("⚠️ <b>فشل جلب بيانات التقرير.</b>\nتأكد أن المفتاح يدعم المؤشر I:SPX.")
         return
 
     prev_day = df.iloc[-1]
@@ -79,7 +94,6 @@ def send_morning_report():
     high = prev_day['high']
     low = prev_day['low']
     
-    # حساب المستويات (Pivot Points)
     pivot = (high + low + prev_close) / 3
     r1 = (2 * pivot) - low
     s1 = (2 * pivot) - high
@@ -109,7 +123,6 @@ def send_morning_report():
 ⏱️ {datetime.now(NY_TZ).strftime('%Y-%m-%d')}
 """
     send_telegram(msg)
-    print("✅ تم إرسال التقرير الصباحي")
 
 def analyze_symbol(symbol):
     df = get_polygon_data(symbol)
@@ -154,7 +167,7 @@ def analyze_symbol(symbol):
         reasons.append("اختراق أعلى سعر للشمعة السابقة")
     elif current_price < prev['low']:
         score -= 20
-        reasons.append("كسر أدنى سعر للشعبة السابقة")
+        reasons.append("كسر أدنى سعر للشمعة السابقة")
 
     display_name = symbol.replace("I:", "")
     
@@ -171,7 +184,6 @@ def analyze_symbol(symbol):
 ⚠️ <i>ليست نصيحة مالية</i>
 """
         send_telegram(msg)
-        print(f"✅ CALL: {display_name}")
 
     elif score <= -50:
         msg = f"""
@@ -186,16 +198,18 @@ def analyze_symbol(symbol):
 ⚠️ <i>ليست نصيحة مالية</i>
 """
         send_telegram(msg)
-        print(f"✅ PUT: {display_name}")
 
 def main():
     global LAST_REPORT_DATE
-    print("🚀 البوت يعمل (SPX, SPY, QQQ)...")
     
-    # 1. إرسال رسالة الترحيب
+    # 1. تشغيل خادم الويب في الخلفية (لإرضاء Render)
+    threading.Thread(target=run_web_server, daemon=True).start()
+    
+    # 2. تشغيل البوت
+    print("🚀 البوت يعمل...")
     send_telegram("✅ <b>تم تشغيل النظام</b>\nمراقبة: SPX, SPY, QQQ")
     
-    # 2. إرسال التقرير فوراً عند التشغيل (للتجربة الآن)
+    # إرسال التقرير فور التشغيل
     send_morning_report()
     LAST_REPORT_DATE = datetime.now(NY_TZ).strftime('%Y-%m-%d')
     
