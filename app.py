@@ -3,7 +3,7 @@ import time
 import requests
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
 # ==================== جلب المفاتيح من Render ====================
@@ -11,14 +11,14 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 POLYGON_KEY = os.environ.get("POLYGON_KEY")
 
-# ==================== قائمة المراقبة (15 رمزاً) ====================
-# المؤشرات الرئيسية، الصناديق المتداولة، وأقوى أسهم العقود
+# ==================== قائمة المراقبة (16 رمزاً) ====================
 WATCHLIST = [
     "I:SPX", "I:NDX", "SPY", "QQQ", "IWM", # المؤشرات والصناديق
-    "NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "AMD", "NFLX", "PLTR" # الأسهم
+    "NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "AMD", "NFLX", "PLTR", "COIN" # الأسهم
 ]
 
 NY_TZ = pytz.timezone('America/New_York')
+LAST_REPORT_DATE = None 
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -29,13 +29,10 @@ def send_telegram(message):
         print(f"خطأ تلقرام: {e}")
 
 def get_polygon_data(symbol, timespan="minute", multiplier=1, limit=50):
-    """جلب البيانات من Polygon.io"""
+    """جلب البيانات اللحظية للمؤشرات والأسهم"""
     end_time = int(time.time() * 1000)
-    # نجلب بيانات آخر ساعتين لتكون كافية لحساب المؤشرات
     start_time = end_time - (120 * 60 * 1000) 
-    
     url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{start_time}/{end_time}?apiKey={POLYGON_KEY}&limit={limit}"
-    
     try:
         response = requests.get(url, timeout=10)
         data = response.json()
@@ -45,51 +42,100 @@ def get_polygon_data(symbol, timespan="minute", multiplier=1, limit=50):
             return df
         return None
     except Exception as e:
-        print(f"خطأ في جلب {symbol}: {e}")
+        return None
+
+def get_daily_data(symbol):
+    """جلب البيانات اليومية للتقرير الصباحي"""
+    end_time = int(time.time() * 1000)
+    start_time = end_time - (5 * 24 * 60 * 60 * 1000) 
+    url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/day/{start_time}/{end_time}?apiKey={POLYGON_KEY}"
+    try:
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        if data.get('results'):
+            df = pd.DataFrame(data['results'])
+            df.rename(columns={'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume'}, inplace=True)
+            return df
+        return None
+    except:
         return None
 
 def calculate_indicators(df):
-    """حساب المؤشرات الفنية الأساسية"""
+    """حساب المتوسطات ومؤشر القوة النسبية"""
     if df is None or len(df) < 20:
         return None
-    
-    # EMA
     df['EMA9'] = df['close'].ewm(span=9, adjust=False).mean()
     df['EMA21'] = df['close'].ewm(span=21, adjust=False).mean()
-    
-    # RSI (14)
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
-    
-    # Volume Average
     df['Vol_Avg'] = df['volume'].rolling(window=20).mean()
-    
     return df
 
+def send_morning_report():
+    """إرسال تقرير SPX الصباحي مع الدعوم والمقاومات"""
+    df = get_daily_data("I:SPX")
+    if df is None or len(df) < 2:
+        return
+
+    prev_day = df.iloc[-1]
+    prev_close = prev_day['close']
+    high = prev_day['high']
+    low = prev_day['low']
+    
+    # حساب مستويات الارتكاز (Pivot Points)
+    pivot = (high + low + prev_close) / 3
+    r1 = (2 * pivot) - low
+    s1 = (2 * pivot) - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+
+    trend = "صاعد 🟢" if prev_close > df.iloc[-2]['close'] else "هابط 🔴"
+    
+    msg = f"""
+🌅 <b>التقرير الصباحي | S&P 500 (SPX)</b>
+
+<b>إغلاق الأمس:</b> {prev_close:.2f}
+<b>الاتجاه المتوقع:</b> {trend}
+
+📊 <b>المستويات المهمة لليوم:</b>
+🔴 <b>مقاومة 2:</b> {r2:.2f}
+🔴 <b>مقاومة 1:</b> {r1:.2f}
+⚪ <b>نقطة الارتكاز:</b> {pivot:.2f}
+🟢 <b>دعم 1:</b> {s1:.2f}
+🟢 <b>دعم 2:</b> {s2:.2f}
+
+🎯 <b>خطة التداول المقترحة:</b>
+• إذا اخترق السعر <b>{r1:.2f}</b> بحجم قوي ← استهدف <b>{r2:.2f}</b> (Call).
+• إذا كسر السعر <b>{s1:.2f}</b> بحجم قوي ← استهدف <b>{s2:.2f}</b> (Put).
+
+⚠️ <i>ليست نصيحة مالية. راقب السيولة عند التنفيذ.</i>
+⏱️ {datetime.now(NY_TZ).strftime('%Y-%m-%d')}
+"""
+    send_telegram(msg)
+    print("✅ تم إرسال التقرير الصباحي")
+
 def analyze_symbol(symbol):
+    """تحليل الزخم اللحظي للأسهم والمؤشرات"""
     df = get_polygon_data(symbol)
     if df is None or len(df) < 20:
         return
-
     df = calculate_indicators(df)
     if df is None:
         return
 
     last = df.iloc[-1]
     prev = df.iloc[-2]
-    
     current_price = last['close']
     current_volume = last['volume']
     avg_volume = last['Vol_Avg']
     
-    # تجهيز أسباب الإشارة والنقاط
     reasons = []
     score = 0
 
-    # 1. طبقة الاتجاه (Trend)
+    # 1. الاتجاه
     if last['EMA9'] > last['EMA21'] and prev['EMA9'] <= prev['EMA21']:
         score += 30
         reasons.append("تقاطع EMA9 فوق EMA21 (صعود)")
@@ -97,7 +143,7 @@ def analyze_symbol(symbol):
         score -= 20
         reasons.append("EMA9 تحت EMA21 (هبوط)")
 
-    # 2. طبقة الزخم (Momentum)
+    # 2. الزخم
     if 40 < last['RSI'] < 70:
         score += 15
         reasons.append(f"RSI صحي ({last['RSI']:.1f})")
@@ -108,23 +154,21 @@ def analyze_symbol(symbol):
         score -= 10
         reasons.append(f"RSI في ذروة البيع ({last['RSI']:.1f})")
 
-    # 3. طبقة الحجم (Volume)
+    # 3. الحجم
     if current_volume > (avg_volume * 1.5):
         score += 25
         reasons.append(f"انفجار في الحجم ({current_volume/avg_volume:.1f}x)")
 
-    # 4. طبقة السعر (Price Action)
+    # 4. حركة السعر
     if current_price > prev['high']:
         score += 20
         reasons.append("اختراق أعلى سعر للشمعة السابقة")
     elif current_price < prev['low']:
         score -= 20
-        reasons.append("كسر أدنى سعر للشعبة السابقة")
+        reasons.append("كسر أدنى سعر للشمعة السابقة")
 
-    # ==================== قرار الإشارة ====================
     display_name = symbol.replace("I:", "")
     
-    # إشارة CALL (شراء)
     if score >= 60:
         msg = f"""
 🟢 <b>إشارة CALL | {display_name}</b>
@@ -138,9 +182,8 @@ def analyze_symbol(symbol):
 ⚠️ <i>ليست نصيحة مالية</i>
 """
         send_telegram(msg)
-        print(f"✅ CALL: {display_name} (Score: {score})")
+        print(f"✅ CALL: {display_name}")
 
-    # إشارة PUT (بيع)
     elif score <= -50:
         msg = f"""
 🔴 <b>إشارة PUT | {display_name}</b>
@@ -154,23 +197,32 @@ def analyze_symbol(symbol):
 ⚠️ <i>ليست نصيحة مالية</i>
 """
         send_telegram(msg)
-        print(f"✅ PUT: {display_name} (Score: {score})")
+        print(f"✅ PUT: {display_name}")
 
 def main():
+    global LAST_REPORT_DATE
     print("🚀 البوت المطور يعمل الآن...")
-    send_telegram("✅ <b>تم تشغيل نظام اصطياد العقود</b>\nالبوت الآن يراقب SPX, NDX وأقوى 13 سهماً للعقود.")
+    send_telegram("✅ <b>تم تشغيل النظام المطور</b>\nمراقبة 16 رمزاً + التقرير الصباحي + إشارات الزخم.")
     
     while True:
         now = datetime.now(NY_TZ)
-        # نعمل فقط أثناء ساعات السوق (9:30 صباحاً - 4:00 مساءً)
+        
+        # 1. إرسال التقرير الصباحي (الساعة 9:00 صباحاً بتوقيت نيويورك)
+        if now.weekday() < 5 and now.hour == 9 and now.minute == 0:
+            today_str = now.strftime('%Y-%m-%d')
+            if LAST_REPORT_DATE != today_str:
+                send_morning_report()
+                LAST_REPORT_DATE = today_str
+
+        # 2. اصطياد الزخم اللحظي (خلال ساعات السوق)
         if now.weekday() < 5 and (9 <= now.hour < 16): 
             for symbol in WATCHLIST:
                 analyze_symbol(symbol)
-                time.sleep(2) # تأخير لتجنب حظر Polygon
+                time.sleep(2) # تأخير بسيط لتجنب الحظر
         else:
             print(f"⏳ السوق مغلق حالياً ({now.strftime('%H:%M')} NY)")
         
-        # انتظار دقيقة واحدة قبل الفحص التالي
+        # انتظار دقيقة قبل الفحص التالي
         time.sleep(60)
 
 if __name__ == "__main__":
