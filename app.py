@@ -31,7 +31,6 @@ def _start_bot_and_scheduler() -> None:
     try:
         _bot_app = build_application()
         
-        # إنشاء event loop مستقل للبوت
         _bot_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(_bot_loop)
 
@@ -49,7 +48,6 @@ def _start_bot_and_scheduler() -> None:
             scheduler = ReportScheduler(send_callback=send_wrapper)
             scheduler.start()
 
-        # تشغيل الـ runner وإبقاء الـ loop يعمل
         _bot_loop.run_until_complete(runner())
         _bot_loop.run_forever()
         
@@ -88,7 +86,6 @@ def start_bot_thread():
         logger.info("Bot thread started.")
 
 
-# تشغيل البوت عند استيراد التطبيق (مهم لـ Gunicorn)
 start_bot_thread()
 
 
