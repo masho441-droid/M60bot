@@ -1,15 +1,17 @@
 services:
-  - type: worker
-    name: smart-scanner
-    runtime: python
+  - type: web
+    name: spx-telegram-bot
+    env: python
+    plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python app.py
+    startCommand: gunicorn -w 1 -k gthread --threads 4 --timeout 120 app:flask_app
     envVars:
-      - key: TELEGRAM_TOKEN
+      - key: POLYGON_API_KEY
         sync: false
-      - key: CHAT_ID
+      - key: TELEGRAM_BOT_TOKEN
         sync: false
-      - key: FINNHUB_KEY
+      - key: TELEGRAM_CHAT_ID
         sync: false
-      - key: POLYGON_KEY
-        sync: false
+      - key: TZ
+        value: UTC
+    autoDeploy: true
