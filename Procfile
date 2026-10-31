@@ -1,1 +1,1 @@
-worker: python app.py
+web: gunicorn -w 1 -k gthread --threads 4 --timeout 120 app:flask_app
