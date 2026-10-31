@@ -1,11 +1,17 @@
+import logging
+from typing import Any, Dict, List
 import pandas as pd
 import requests
 from io import StringIO
 
+logger = logging.getLogger(__name__)
+
+class MarketDataError(Exception):
+    pass
+
 def get_daily_bars(limit: int = 60) -> List[Dict[str, Any]]:
     """جلب بيانات SPX اليومية من Stooq (مجاني ولا يحظر السيرفرات)"""
     try:
-        # Stooq تستخدم الرمز ^spx لمؤشر S&P 500
         url = "https://stooq.com/q/d/l/?s=^spx&i=d"
         response = requests.get(url, timeout=15)
         response.raise_for_status()
@@ -30,3 +36,8 @@ def get_daily_bars(limit: int = 60) -> List[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"Stooq fetch error: {e}")
         raise MarketDataError(str(e))
+
+def get_previous_close() -> float:
+    """إغلاق اليوم السابق (مطلوب لملف bot.py)"""
+    bars = get_daily_bars(limit=3)
+    return float(bars[-1]["c"])
