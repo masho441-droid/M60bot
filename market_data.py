@@ -1,43 +1,32 @@
-import logging
-from datetime import datetime
-from typing import Any, Dict, List
-import yfinance as yf
-
-logger = logging.getLogger(__name__)
-
-class MarketDataError(Exception):
-    pass
+import pandas as pd
+import requests
+from io import StringIO
 
 def get_daily_bars(limit: int = 60) -> List[Dict[str, Any]]:
-    """جلب بيانات SPX اليومية من yfinance (مجاني وبدون مفتاح)"""
+    """جلب بيانات SPX اليومية من Stooq (مجاني ولا يحظر السيرفرات)"""
     try:
-        # نستخدم ^GSPC لجلب مؤشر S&P 500
-        df = yf.download("^GSPC", period="3mo", interval="1d", progress=False)
-        if df.empty:
-            raise MarketDataError("No data returned from yfinance")
+        # Stooq تستخدم الرمز ^spx لمؤشر S&P 500
+        url = "https://stooq.com/q/d/l/?s=^spx&i=d"
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
         
-        # تنظيف البيانات وتحويلها للتنسيق المطلوب
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
+        df = pd.read_csv(StringIO(response.text))
+        if df.empty:
+            raise MarketDataError("No data from Stooq")
+        
         df.columns = [c.lower() for c in df.columns]
+        df = df.tail(limit)
         
         results = []
-        for index, row in df.iterrows():
+        for _, row in df.iterrows():
             results.append({
-                "t": int(index.timestamp() * 1000),
                 "o": float(row["open"]),
                 "h": float(row["high"]),
                 "l": float(row["low"]),
                 "c": float(row["close"]),
-                "v": float(row["volume"])
+                "v": float(row["volume"]) if "volume" in row else 0
             })
-        
-        # نأخذ آخر limit شمعة فقط
-        return results[-limit:]
+        return results
     except Exception as e:
-        logger.error(f"yfinance fetch error: {e}")
+        logger.error(f"Stooq fetch error: {e}")
         raise MarketDataError(str(e))
-
-def get_previous_close() -> float:
-    bars = get_daily_bars(limit=3)
-    return float(bars[-1]["c"])
