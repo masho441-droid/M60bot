@@ -11,6 +11,9 @@ from scheduler import ReportScheduler
 from market_data import get_daily_bars, MarketDataError
 from indicators import calculate_pivot, calculate_trend, calculate_atr
 
+# استيراد مراقب السوق اللحظي
+from intraday_monitor import monitor_market
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -76,8 +79,17 @@ def report_json():
         return jsonify({"error": str(exc)}), 503
 
 
-# بدء البوت في thread منفصل بمجرد استيراد التطبيق
+# =========================================================
+# تشغيل الخيوط (Threads) في الخلفية
+# =========================================================
+
+# 1. تشغيل بوت التليجرام (لأوامر /report و /start)
 threading.Thread(target=_start_bot_and_scheduler, daemon=True).start()
+logger.info("Telegram Bot thread started.")
+
+# 2. تشغيل مراقب السوق اللحظي (لاصطياد المستويات)
+threading.Thread(target=monitor_market, daemon=True).start()
+logger.info("Intraday Market Monitor thread started.")
 
 
 if __name__ == "__main__":
