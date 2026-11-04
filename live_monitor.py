@@ -12,17 +12,20 @@ LAST_ALERT_TIME = {}
 ALERT_COOLDOWN = 300  # 5 دقائق بين كل تنبيه لنفس المستوى
 
 def get_spx_data():
-    """جلب سعر SPX اللحظي وبيانات آخر ساعة لتحديد المستويات ديناميكياً"""
-    try:
-        ticker = yf.Ticker("^GSPC")
-        # نجلب بيانات آخر يوم بفاصل دقيقة واحدة
-        data = ticker.history(period="1d", interval="1m")
-        if not data.empty:
-            return data
-        return None
-    except Exception as e:
-        logger.error(f"Error fetching price data: {e}")
-        return None
+    """جلب سعر SPX اللحظي مع إعادة المحاولة عند الفشل"""
+    for attempt in range(3):
+        try:
+            ticker = yf.Ticker("^GSPC")
+            # نجلب بيانات آخر يوم بفاصل دقيقة واحدة
+            data = ticker.history(period="1d", interval="1m")
+            if not data.empty:
+                return data
+        except Exception as e:
+            logger.warning(f"Yahoo attempt {attempt + 1} failed: {e}")
+            time.sleep(5) # انتظار 5 ثواني قبل المحاولة التالية
+    
+    logger.error("Failed to fetch SPX data after 3 attempts.")
+    return None
 
 def send_telegram_alert(message):
     """إرسال التنبيه إلى تلجرام"""
