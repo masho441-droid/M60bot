@@ -11,8 +11,8 @@ from scheduler import ReportScheduler
 from market_data import get_daily_bars, MarketDataError
 from indicators import calculate_pivot, calculate_trend, calculate_atr
 
-# استيراد مراقب السوق اللحظي
-from intraday_monitor import monitor_market
+# استيراد المراقب الديناميكي الجديد
+from live_monitor import monitor_market_dynamic
 
 logging.basicConfig(
     level=logging.INFO,
@@ -87,9 +87,9 @@ def report_json():
 threading.Thread(target=_start_bot_and_scheduler, daemon=True).start()
 logger.info("Telegram Bot thread started.")
 
-# 2. تشغيل مراقب السوق اللحظي (لاصطياد المستويات)
-threading.Thread(target=monitor_market, daemon=True).start()
-logger.info("Intraday Market Monitor thread started.")
+# 2. تشغيل المراقب الديناميكي للسوق
+threading.Thread(target=monitor_market_dynamic, daemon=True).start()
+logger.info("Dynamic Market Monitor thread started.")
 
 
 if __name__ == "__main__":
