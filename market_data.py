@@ -1,7 +1,6 @@
 import logging
+import pandas as pd
 from typing import Any, Dict, List
-import requests
-import os
 
 logger = logging.getLogger(__name__)
 
@@ -9,55 +8,32 @@ class MarketDataError(Exception):
     pass
 
 def get_daily_bars(limit: int = 60) -> List[Dict[str, Any]]:
-    """جلب بيانات SPX اليومية من Yahoo Finance مباشرة (بدون مكتبة معقدة)"""
+    """جلب بيانات SPX اليومية من Stooq (بديل مستقر لياهو)"""
     try:
-        # نستخدم Yahoo Finance Query API مباشرة مع User-Agent لتجنب الحظر
-        url = "https://query1.finance.yahoo.com/v8/finance/chart/^GSPC"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        params = {
-            "range": "3mo",
-            "interval": "1d"
-        }
+        # stooq يستخدم الرمز ^spx لمؤشر S&P 500
+        url = "https://stooq.com/q/d/l/?s=^spx&i=d"
+        df = pd.read_csv(url)
         
-        response = requests.get(url, headers=headers, params=params, timeout=15)
-        response.raise_for_status()
-        data = response.json()
+        if df.empty:
+            raise MarketDataError("No data returned from Stooq")
         
-        result = data.get("chart", {}).get("result", [])
-        if not result:
-            raise MarketDataError("No data from Yahoo Finance")
-            
-        chart = result[0]
-        timestamps = chart.get("timestamp", [])
-        indicators = chart.get("indicators", {}).get("quote", [{}])[0]
-        
-        opens = indicators.get("open", [])
-        highs = indicators.get("high", [])
-        lows = indicators.get("low", [])
-        closes = indicators.get("close", [])
-        volumes = indicators.get("volume", [])
+        df.columns = [c.lower() for c in df.columns]
+        # نحتفظ بآخر limit شمعة
+        df = df.tail(limit)
         
         bars = []
-        for i in range(len(timestamps)):
-            if closes[i] is None:
-                continue
+        for _, row in df.iterrows():
             bars.append({
-                "o": float(opens[i]),
-                "h": float(highs[i]),
-                "l": float(lows[i]),
-                "c": float(closes[i]),
-                "v": float(volumes[i]) if volumes[i] else 0.0
+                "o": float(row["open"]),
+                "h": float(row["high"]),
+                "l": float(row["low"]),
+                "c": float(row["close"]),
+                "v": 0.0 # stooq لا يوفر الحجم للمؤشرات في هذا الرابط، لا نحتاجه للتقرير
             })
-            
-        if len(bars) < 3:
-            raise MarketDataError("Insufficient data from Yahoo Finance")
-            
-        return bars[-limit:]
         
+        return bars
     except Exception as e:
-        logger.error(f"Yahoo Finance fetch error: {e}")
+        logger.error(f"Stooq fetch error: {e}")
         raise MarketDataError(str(e))
 
 def get_previous_close() -> float:
