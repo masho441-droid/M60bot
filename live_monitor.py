@@ -43,8 +43,8 @@ def send_alert(msg):
 
 def monitor_market_dynamic():
     global ACTIVE_TRADE, LAST_ALERT, TRADES_TODAY, LOSSES_IN_ROW, LAST_TRADE_CLOSE_TIME
-    logger.info("VWAP + ORB + EMA9 + Volume - Strong Strategy Started")
-    send_alert("✅ <b>البوت اشتغل - استراتيجية قوية</b>\nVWAP + افتتاح 15 د + EMA 9 + فوليوم\nعقد واحد | حد أقصى 10 صفقات")
+    logger.info("VWAP + ORB + EMA9 + Volume - All Day - 30min Timeout")
+    send_alert("✅ <b>البوت اشتغل - طول اليوم - خروج بعد 30 دقيقة</b>\nVWAP + افتتاح + EMA9 + فوليوم\nعقد واحد | 10 صفقات | ما تعلق الصفقة أكثر من 30 د")
 
     while True:
         try:
@@ -63,7 +63,6 @@ def monitor_market_dynamic():
             df['ema9'] = df['close'].ewm(span=9).mean()
             ema9 = float(df['ema9'].iloc[-1])
 
-            # فوليوم - بدون اقواس متداخلة
             avg_vol_raw = df['volume'].tail(20).mean()
             avg_vol = float(avg_vol_raw)
             last_vol_raw = df['volume'].iloc[-1]
@@ -86,28 +85,50 @@ def monitor_market_dynamic():
                 if time.time() - LAST_TRADE_CLOSE_TIME < 300 and TRADES_TODAY > 0:
                     time.sleep(60)
                     continue
-                if len(df) < 16 or len(df) > 120:
+                if len(df) < 16:
+                    time.sleep(60)
+                    continue
+                if len(df) > 360:
                     time.sleep(60)
                     continue
 
-                is_call = price > vwap and price > orb_high and price > ema9 and vol_ok and abs(price - orb_high) <= 3.0
-                is_put = price < vwap and price < orb_low and price < ema9 and vol_ok and abs(price - orb_low) <= 3.0
+                is_call = price > vwap and price > orb_high and price > ema9 and vol_ok
+                is_put = price < vwap and price < orb_low and price < ema9 and vol_ok
 
                 if is_call and time.time() - LAST_ALERT > 60:
                     base = round(price / 5) * 5
                     contract = f"SPXW C {base + 5}"
-                    ACTIVE_TRADE = {"type": "CALL", "contract": contract, "entry": price, "tp1": price + 15, "tp2": price + 25, "sl": price - 8, "tp1_hit": False}
+                    ACTIVE_TRADE = {"type": "CALL", "contract": contract, "entry": price, "tp1": price + 15, "tp2": price + 25, "sl": price - 8, "tp1_hit": False, "entry_time": time.time()}
                     LAST_ALERT = time.time()
-                    send_alert(f"🚨 <b>دخول CALL - عقد واحد - صفقة {TRADES_TODAY + 1}/10</b>\n<b>السعر:</b> {price:.2f}\n<b>VWAP:</b> {vwap:.2f} | <b>EMA9:</b> {ema9:.2f}\n<b>العقد:</b> <code>{contract}</code>\n🎯 هدف 1: {price + 15:.2f}\n🛑 وقف: {price - 8:.2f}\n⏱️ {now_str}")
+                    send_alert(f"🚨 <b>دخول CALL - عقد واحد - صفقة {TRADES_TODAY + 1}/10</b>\n<b>السعر:</b> {price:.2f}\n<b>VWAP:</b> {vwap:.2f} | <b>EMA9:</b> {ema9:.2f}\n<b>العقد:</b> <code>{contract}</code>\n🎯 هدف 1: {price + 15:.2f}\n🛑 وقف: {price - 8:.2f}\n⏱️ {now_str}\n<i>بقفلها بعد 30 دقيقة إذا ما تحركت</i>")
                 elif is_put and time.time() - LAST_ALERT > 60:
                     base = round(price / 5) * 5
                     contract = f"SPXW P {base - 5}"
-                    ACTIVE_TRADE = {"type": "PUT", "contract": contract, "entry": price, "tp1": price - 15, "tp2": price - 25, "sl": price + 8, "tp1_hit": False}
+                    ACTIVE_TRADE = {"type": "PUT", "contract": contract, "entry": price, "tp1": price - 15, "tp2": price - 25, "sl": price + 8, "tp1_hit": False, "entry_time": time.time()}
                     LAST_ALERT = time.time()
-                    send_alert(f"🚨 <b>دخول PUT - عقد واحد - صفقة {TRADES_TODAY + 1}/10</b>\n<b>السعر:</b> {price:.2f}\n<b>VWAP:</b> {vwap:.2f} | <b>EMA9:</b> {ema9:.2f}\n<b>العقد:</b> <code>{contract}</code>\n🎯 هدف 1: {price - 15:.2f}\n🛑 وقف: {price + 8:.2f}\n⏱️ {now_str}")
+                    send_alert(f"🚨 <b>دخول PUT - عقد واحد - صفقة {TRADES_TODAY + 1}/10</b>\n<b>السعر:</b> {price:.2f}\n<b>VWAP:</b> {vwap:.2f} | <b>EMA9:</b> {ema9:.2f}\n<b>العقد:</b> <code>{contract}</code>\n🎯 هدف 1: {price - 15:.2f}\n🛑 وقف: {price + 8:.2f}\n⏱️ {now_str}\n<i>بقفلها بعد 30 دقيقة إذا ما تحركت</i>")
 
             else:
                 t = ACTIVE_TRADE
+
+                # خروج بعد 30 دقيقة - عشان ما تعلق الصفقة وتمنع باقي الصفقات
+                if time.time() - t.get("entry_time", time.time()) > 1800:
+                    if t["type"] == "CALL":
+                        profit = price - t["entry"]
+                    else:
+                        profit = t["entry"] - price
+                    is_win = profit > 0
+                    TRADES_TODAY += 1
+                    if is_win:
+                        LOSSES_IN_ROW = 0
+                    else:
+                        LOSSES_IN_ROW += 1
+                    LAST_TRADE_CLOSE_TIME = time.time()
+                    send_alert(f"⏰ <b>قفل - انتهى الوقت 30 دقيقة</b>\nالعقد: <code>{t['contract']}</code>\nدخول: {t['entry']:.2f} | إغلاق: {price:.2f} | النتيجة: {profit:+.2f} نقطة\nالصفقة: {TRADES_TODAY}/10\n⏱️ {now_str}\n<i>بدور لك صفقة جديدة بعد 5 دقايق</i>")
+                    ACTIVE_TRADE = None
+                    time.sleep(60)
+                    continue
+
                 if t["type"] == "CALL":
                     if price >= t["tp1"] and not t["tp1_hit"]:
                         t["tp1_hit"] = True
