@@ -1,8 +1,8 @@
 import logging
 import time
 import requests
-import yfinance as yf
 import os
+import pandas as pd
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -12,18 +12,53 @@ LAST_ALERT_TIME = {}
 ALERT_COOLDOWN = 300  # 5 دقائق بين كل تنبيه لنفس المستوى
 
 def get_spx_data():
-    """جلب سعر SPX اللحظي مع إعادة المحاولة عند الفشل"""
+    """جلب سعر SPX اللحظي مباشرة من Yahoo Finance باستخدام requests (بدون مكتبة yfinance)"""
+    url = "https://query1.finance.yahoo.com/v8/finance/chart/^GSPC"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    params = {
+        "interval": "1m",
+        "range": "1d"
+    }
+    
     for attempt in range(3):
         try:
-            ticker = yf.Ticker("^GSPC")
-            # نجلب بيانات آخر يوم بفاصل دقيقة واحدة
-            data = ticker.history(period="1d", interval="1m")
-            if not data.empty:
-                return data
+            response = requests.get(url, headers=headers, params=params, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            
+            result = data.get("chart", {}).get("result", [])
+            if not result:
+                raise Exception("No data from Yahoo")
+                
+            chart = result[0]
+            timestamps = chart.get("timestamp", [])
+            indicators = chart.get("indicators", {}).get("quote", [{}])[0]
+            closes = indicators.get("close", [])
+            highs = indicators.get("high", [])
+            lows = indicators.get("low", [])
+            
+            # تنظيف القيم الفارغة
+            valid_data = []
+            for i in range(len(timestamps)):
+                if closes[i] is not None and highs[i] is not None and lows[i] is not None:
+                    valid_data.append({
+                        "close": closes[i],
+                        "high": highs[i],
+                        "low": lows[i]
+                    })
+            
+            if not valid_data:
+                raise Exception("No valid data")
+                
+            df = pd.DataFrame(valid_data)
+            return df
+            
         except Exception as e:
             logger.warning(f"Yahoo attempt {attempt + 1} failed: {e}")
-            time.sleep(5) # انتظار 5 ثواني قبل المحاولة التالية
-    
+            time.sleep(5)
+            
     logger.error("Failed to fetch SPX data after 3 attempts.")
     return None
 
@@ -48,11 +83,11 @@ def monitor_market_dynamic():
                 time.sleep(60)
                 continue
             
-            current_price = df['Close'].iloc[-1]
+            current_price = df['close'].iloc[-1]
             
             # 1. تحديد أعلى قمة وأدنى قاع في آخر ساعة (60 دقيقة) بشكل ديناميكي
-            recent_high = df['High'].iloc[-60:].max()
-            recent_low = df['Low'].iloc[-60:].min()
+            recent_high = df['high'].iloc[-60:].max()
+            recent_low = df['low'].iloc[-60:].min()
             
             # 2. حساب المسافة للاقتراب
             dist_to_res = abs(recent_high - current_price)
