@@ -27,16 +27,25 @@ class ReportScheduler:
     async def _job(self) -> None:
         now_utc = datetime.utcnow()
         now_ny = now_utc.astimezone(NY_TZ)
+        
+        # تخطي عطل نهاية الأسبوع والأعياد
         if now_ny.weekday() >= 5 or _is_market_holiday(now_ny):
             logger.info("Skipping report — market closed.")
             return
+            
+        # منع التكرار في نفس اليوم
         if self._last_sent_date == now_utc.date():
             return
         self._last_sent_date = now_utc.date()
+        
         await self.send_callback()
 
     def start(self) -> None:
-        self.scheduler.add_job(self._job, CronTrigger(hour=13, minute=0, timezone="UTC"), id="premarket")
-        self.scheduler.add_job(self._job, CronTrigger(hour=20, minute=15, timezone="UTC"), id="postmarket")
+        # إرسال التقرير الساعة 12:20 بتوقيت مكة (وهو ما يعادل 21:20 بتوقيت UTC)
+        self.scheduler.add_job(
+            self._job, 
+            CronTrigger(hour=21, minute=20, timezone="UTC"), 
+            id="postmarket_report"
+        )
         self.scheduler.start()
-        logger.info("Scheduler started.")
+        logger.info("Scheduler started. Next report at 21:20 UTC (12:20 AM Mecca Time).")
